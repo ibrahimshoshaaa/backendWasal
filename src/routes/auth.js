@@ -139,6 +139,29 @@ router.post('/login', async (req, res) => {
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ error: 'بيانات الدخول غير صحيحة' });
 
+    if (user.role === 'driver' && user.driver_status !== 'active') {
+      const msg =
+        user.driver_status === 'suspended'
+          ? 'تم رفض حسابك أو إيقافه. تواصل مع الإدارة.'
+          : 'حسابك لسه تحت المراجعة من الإدارة، هيتفعل قريباً.';
+      return res.status(403).json({ error: msg });
+    }
+
+    if (user.role === 'merchant') {
+      const { rows: merchantRows } = await query(
+        'SELECT status FROM merchants WHERE owner_user_id=$1 LIMIT 1',
+        [user.id]
+      );
+      const merchantStatus = merchantRows[0]?.status;
+      if (merchantStatus && merchantStatus !== 'approved') {
+        const msg =
+          merchantStatus === 'suspended'
+            ? 'تم إيقاف حساب متجرك. تواصل مع الإدارة.'
+            : 'حساب متجرك لسه تحت المراجعة من الإدارة، هيتفعل قريباً.';
+        return res.status(403).json({ error: msg });
+      }
+    }
+
     res.json({ token: signToken(user), user: publicUser(user) });
   } catch (err) {
     console.error(err);
