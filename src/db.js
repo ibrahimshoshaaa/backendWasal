@@ -25,9 +25,21 @@ async function initSchema() {
       driver_lat DOUBLE PRECISION,
       driver_lng DOUBLE PRECISION,
       driver_status TEXT DEFAULT 'pending', -- pending | active | suspended (admin-managed)
+      national_id TEXT,
+      vehicle_type TEXT,
+      id_front_url TEXT,
+      id_back_url TEXT,
+      selfie_url TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
+
+  // Older databases created before these columns existed.
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS national_id TEXT`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS vehicle_type TEXT`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS id_front_url TEXT`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS id_back_url TEXT`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS selfie_url TEXT`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS categories (
@@ -48,10 +60,13 @@ async function initSchema() {
       image_url TEXT,
       address TEXT,
       phone TEXT,
+      tags JSONB,
       status TEXT NOT NULL DEFAULT 'pending', -- pending | approved | suspended
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
+
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS tags JSONB`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS products (
