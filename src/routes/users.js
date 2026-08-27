@@ -26,4 +26,20 @@ router.put('/me', requireAuth, async (req, res) => {
   res.json({ user: publicUser(rows[0]) });
 });
 
+router.delete('/me', requireAuth, async (req, res) => {
+  try {
+    await query('DELETE FROM users WHERE id=$1', [req.userId]);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err.code === '23503') {
+      // FK violation — the account has order history that must be kept.
+      return res.status(400).json({
+        error: 'لا يمكن حذف الحساب لوجود طلبات سابقة مرتبطة بيه. تواصل مع الدعم الفني لحذفه يدويًا.',
+      });
+    }
+    console.error(err);
+    res.status(500).json({ error: 'حدث خطأ غير متوقع' });
+  }
+});
+
 module.exports = router;

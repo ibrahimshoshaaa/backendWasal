@@ -19,7 +19,8 @@ router.get('/merchants', async (req, res) => {
 
 router.get('/drivers', async (req, res) => {
   const { rows } = await query(
-    `SELECT id, full_name, email, phone, is_online, driver_status, driver_lat, driver_lng
+    `SELECT id, full_name, email, phone, is_online, driver_status, driver_lat, driver_lng,
+            national_id, vehicle_type, id_front_url, id_back_url, selfie_url
      FROM users WHERE role='driver' ORDER BY id DESC`
   );
   res.json(rows);
