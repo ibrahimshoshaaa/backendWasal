@@ -61,6 +61,7 @@ async function initSchema() {
       address TEXT,
       phone TEXT,
       tags JSONB,
+      tags JSONB,
       is_open BOOLEAN NOT NULL DEFAULT true,
       delivery_fee NUMERIC(10,2) NOT NULL DEFAULT 20,
       delivery_time_minutes INT NOT NULL DEFAULT 30,
@@ -70,7 +71,7 @@ async function initSchema() {
     );
   `);
 
-  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS tags JSONB`);
+   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS tags JSONB`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS is_open BOOLEAN NOT NULL DEFAULT true`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS delivery_fee NUMERIC(10,2) NOT NULL DEFAULT 20`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS delivery_time_minutes INT NOT NULL DEFAULT 30`);
@@ -80,7 +81,6 @@ async function initSchema() {
   // 'approved'/'suspended' status values — fix any rows saved with those.
   await query(`UPDATE merchants SET status='approved' WHERE status='active'`);
   await query(`UPDATE merchants SET status='suspended' WHERE status='inactive'`);
-
   await query(`
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
