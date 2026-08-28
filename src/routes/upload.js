@@ -18,7 +18,9 @@ const upload = multer({
   storage,
   limits: { fileSize: 8 * 1024 * 1024 }, // 8MB
   fileFilter: (req, file, cb) => {
-    if (!file.mimetype.startsWith('image/')) {
+    const isImageMime = file.mimetype.startsWith('image/');
+    const isImageExt = /\.(jpe?g|png|gif|webp|heic|heif|bmp)$/i.test(file.originalname);
+    if (!isImageMime && !isImageExt) {
       return cb(new Error('الملف لازم يكون صورة'));
     }
     cb(null, true);
