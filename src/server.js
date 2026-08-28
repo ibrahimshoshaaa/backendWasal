@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const http = require('http');
+const { WebSocketServer } = require('ws');
 
 const { initSchema } = require('./db');
 const { router: authRoutes } = require('./routes/auth');
@@ -39,17 +41,68 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/notifications', notificationsRoutes);
 
-// Fallback error handler (e.g. multer file-type rejection).
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(400).json({ error: err.message || 'حدث خطأ غير متوقع' });
 });
 
+// ─── WebSocket server ──────────────────────────────────────────────────────────
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server, path: '/ws' });
+
+// Map: userId (string) -> Set of ws connections
+const clients = new Map();
+
+function registerClient(userId, ws) {
+  if (!clients.has(userId)) clients.set(userId, new Set());
+  clients.get(userId).add(ws);
+}
+
+function removeClient(userId, ws) {
+  clients.get(userId)?.delete(ws);
+}
+
+// Send JSON event to a specific user (all their open connections)
+function sendToUser(userId, event) {
+  const conns = clients.get(String(userId));
+  if (!conns) return;
+  const msg = JSON.stringify(event);
+  for (const ws of conns) {
+    if (ws.readyState === ws.OPEN) ws.send(msg);
+  }
+}
+
+wss.on('connection', (ws, req) => {
+  // Client authenticates by sending: { type: 'auth', token: '...' }
+  const { verifyToken } = require('./middleware/auth');
+  let userId = null;
+
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw);
+      if (msg.type === 'auth') {
+        const payload = verifyToken(msg.token);
+        if (!payload) { ws.close(); return; }
+        userId = String(payload.id);
+        registerClient(userId, ws);
+        ws.send(JSON.stringify({ type: 'auth_ok' }));
+      }
+    } catch (_) {}
+  });
+
+  ws.on('close', () => {
+    if (userId) removeClient(userId, ws);
+  });
+});
+
+// Attach sendToUser globally so routes can use it
+app.locals.sendToUser = sendToUser;
+
 const PORT = process.env.PORT || 3000;
 
 initSchema()
   .then(() => {
-    app.listen(PORT, () => console.log(`Wasal backend running on port ${PORT}`));
+    server.listen(PORT, () => console.log(`Wasal backend running on port ${PORT}`));
   })
   .catch((err) => {
     console.error('Failed to initialize database:', err);

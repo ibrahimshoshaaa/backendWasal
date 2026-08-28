@@ -3,8 +3,7 @@ const bcrypt = require('bcryptjs');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-     ssl: { rejectUnauthorized: false },
-
+  ssl: { rejectUnauthorized: false },
 });
 
 async function query(text, params) {
@@ -19,27 +18,19 @@ async function initSchema() {
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       phone TEXT,
-      role TEXT NOT NULL DEFAULT 'customer', -- customer | merchant | driver | admin
+      role TEXT NOT NULL DEFAULT 'customer',
       avatar_url TEXT,
       is_online BOOLEAN NOT NULL DEFAULT false,
       driver_lat DOUBLE PRECISION,
       driver_lng DOUBLE PRECISION,
-      driver_status TEXT DEFAULT 'pending', -- pending | active | suspended (admin-managed)
+      driver_status TEXT DEFAULT 'pending',
       national_id TEXT,
       vehicle_type TEXT,
       id_front_url TEXT,
       id_back_url TEXT,
-      selfie_url TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      selfie_url TEXT
     );
   `);
-
-  // Older databases created before these columns existed.
-  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS national_id TEXT`);
-  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS vehicle_type TEXT`);
-  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS id_front_url TEXT`);
-  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS id_back_url TEXT`);
-  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS selfie_url TEXT`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS categories (
@@ -54,33 +45,27 @@ async function initSchema() {
   await query(`
     CREATE TABLE IF NOT EXISTS merchants (
       id SERIAL PRIMARY KEY,
-      owner_user_id INT REFERENCES users(id) ON DELETE SET NULL,
+      owner_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
-      category_id INT REFERENCES categories(id) ON DELETE SET NULL,
+      category_id INT REFERENCES categories(id),
       image_url TEXT,
       address TEXT,
       phone TEXT,
-      tags JSONB,
+      status TEXT NOT NULL DEFAULT 'pending',
       tags JSONB,
       is_open BOOLEAN NOT NULL DEFAULT true,
       delivery_fee NUMERIC(10,2) NOT NULL DEFAULT 20,
       delivery_time_minutes INT NOT NULL DEFAULT 30,
-      min_order NUMERIC(10,2) NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'pending', -- pending | approved | suspended
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      min_order NUMERIC(10,2) NOT NULL DEFAULT 0
     );
   `);
 
-   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS tags JSONB`);
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS tags JSONB`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS is_open BOOLEAN NOT NULL DEFAULT true`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS delivery_fee NUMERIC(10,2) NOT NULL DEFAULT 20`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS delivery_time_minutes INT NOT NULL DEFAULT 30`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2) NOT NULL DEFAULT 0`);
 
-  // The admin app used to send 'active'/'inactive' instead of the real
-  // 'approved'/'suspended' status values — fix any rows saved with those.
-  await query(`UPDATE merchants SET status='approved' WHERE status='active'`);
-  await query(`UPDATE merchants SET status='suspended' WHERE status='inactive'`);
   await query(`
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
@@ -105,8 +90,7 @@ async function initSchema() {
       phone TEXT,
       lat DOUBLE PRECISION,
       lng DOUBLE PRECISION,
-      is_default BOOLEAN NOT NULL DEFAULT false,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      is_default BOOLEAN NOT NULL DEFAULT false
     );
   `);
 
@@ -123,6 +107,7 @@ async function initSchema() {
   await query(`
     CREATE TABLE IF NOT EXISTS orders (
       id SERIAL PRIMARY KEY,
+      order_number TEXT UNIQUE,
       customer_id INT NOT NULL REFERENCES users(id),
       merchant_id INT NOT NULL REFERENCES merchants(id),
       address_id INT REFERENCES addresses(id),
@@ -133,7 +118,44 @@ async function initSchema() {
       total NUMERIC(10,2) NOT NULL DEFAULT 0,
       payment_method TEXT NOT NULL DEFAULT 'cash',
       notes TEXT,
-      status TEXT NOT NULL DEFAULT 'pending', -- pending|accepted|ready|picked_up|delivered|cancelled
+      cancel_reason TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      accepted_at TIMESTAMPTZ,
+      ready_at TIMESTAMPTZ,
+      picked_up_at TIMESTAMPTZ,
+      delivered_at TIMESTAMPTZ,
+      cancelled_at TIMESTAMPTZ,
+      rating INT,
+      rating_comment TEXT
+    );
+  `);
+
+  await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_number TEXT`);
+  await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT`);
+  await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS ready_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS picked_up_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS rating INT`);
+  await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS rating_comment TEXT`);
+
+  // Generate order_number for old rows that don't have one
+  await query(`
+    UPDATE orders SET order_number = 'WS-' || LPAD(id::TEXT, 5, '0')
+    WHERE order_number IS NULL
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id SERIAL PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      type TEXT,
+      order_id INT REFERENCES orders(id) ON DELETE SET NULL,
+      is_read BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
@@ -160,8 +182,17 @@ async function seed() {
        VALUES ('Admin', 'admin@wasal.app', $1, 'admin', 'active')`,
       [hash]
     );
-    console.log('Seeded default admin -> admin@wasal.app / admin123 (change this password!)');
+    console.log('Seeded default admin -> admin@wasal.app / admin123');
   }
 }
 
-module.exports = { pool, query, initSchema };
+// Helper: create notification for a user
+async function createNotification(userId, { title, body, type, orderId }) {
+  await query(
+    `INSERT INTO notifications (user_id, title, body, type, order_id)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [userId, title, body, type || null, orderId || null]
+  );
+}
+
+module.exports = { pool, query, initSchema, createNotification };
