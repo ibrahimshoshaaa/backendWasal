@@ -30,4 +30,15 @@ function requireRole(...roles) {
   };
 }
 
-module.exports = { signToken, requireAuth, requireRole, JWT_SECRET };
+// Used by the WebSocket handshake (server.js) to authenticate the
+// 'auth' message, outside of the normal Express request/response cycle.
+// Returns the decoded payload ({ id, role }) or null if invalid/expired.
+function verifyToken(token) {
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch (_) {
+    return null;
+  }
+}
+
+module.exports = { signToken, verifyToken, requireAuth, requireRole, JWT_SECRET };
