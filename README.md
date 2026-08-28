@@ -3,19 +3,21 @@
 باك اند REST API لتطبيق وصل، مبني بـ **Node.js + Express + PostgreSQL**، ومصمم عشان يشتغل مع
 `api_service.dart` الموجود في تطبيق الفلاتر من غير أي تعديل — نفس الـ endpoints، نفس شكل الـ JWT.
 
-تم اختباره فعليًا (تسجيل، تسجيل دخول، سلة، طلب كامل، قبول تاجر، تتبع موقع سائق لحظي، تسليم) وكله شغال.
+الصور بترفع مباشرة على **Cloudinary**، مافيش أي تخزين محلي على السيرفر، فالمشروع آمن على Railway
+مهما اتعمل Redeploy.
 
 ## التشغيل محليًا
 
 ### 1. متطلبات
 - Node.js 18+
 - PostgreSQL شغال (محلي أو Supabase/أي مزود سحابي)
+- حساب Cloudinary (مجاني)
 
 ### 2. تجهيز قاعدة البيانات
 ```bash
 createdb wasal
 ```
-أو لو هتستخدم Supabase، خد الـ connection string من إعدادات المشروع (Database → Connection string).
+أو استخدم Supabase / Railway Postgres وخد الـ connection string.
 
 ### 3. الإعداد
 ```bash
@@ -24,61 +26,79 @@ npm install
 cp .env.example .env
 ```
 افتح `.env` وحط:
-- `DATABASE_URL` — رابط قاعدة البيانات بتاعتك
-- `JWT_SECRET` — أي نص عشوائي طويل وسري
-- `PUBLIC_URL` — الرابط اللي هيوصل بيه تطبيق الفلاتر لرفع الصور (استخدم `http://10.0.2.2:3000` للإيموليتر)
+- `DATABASE_URL` — رابط قاعدة البيانات
+- `JWT_SECRET` — نص عشوائي طويل وسري
+- `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` — من Dashboard حساب Cloudinary
 
 ### 4. التشغيل
 ```bash
 npm start
 ```
-أول تشغيل هيعمل كل الجداول تلقائيًا (`CREATE TABLE IF NOT EXISTS`) ويعمل حساب أدمن افتراضي:
+أول تشغيل هيعمل كل الجداول تلقائيًا + Migrations لأعمدة `*_public_id` + حساب أدمن افتراضي:
 ```
 admin@wasal.app / admin123
 ```
-**غيّر الباسورد ده فورًا** — سجّل دخول وحدّثه، أو غيّره في قاعدة البيانات مباشرة.
+**غيّر الباسورد ده فورًا**.
+
+## النشر على Railway
+1. اربط الريبو بـ Railway.
+2. زوّد متغيرات البيئة في Railway Variables:
+   - `DATABASE_URL` (تلقائي لو ربطت Postgres plugin)
+   - `JWT_SECRET`
+   - `CLOUDINARY_CLOUD_NAME`
+   - `CLOUDINARY_API_KEY`
+   - `CLOUDINARY_API_SECRET`
+3. Railway هيحقن `PORT` تلقائيًا — ما تحطهوش يدوي.
+4. مافيش حاجة لأي Persistent Volume، الصور كلها على Cloudinary.
 
 ## ربطه بتطبيق الفلاتر
-في `lib/api_service.dart`، الـ `baseUrl` متظبط بالفعل على:
+في `lib/api_service.dart`، الـ `baseUrl` متظبط على:
 ```dart
 static const String baseUrl = 'http://10.0.2.2:3000/api';
 ```
-ده عنوان الـ localhost بتاع جهازك من وجهة نظر الإيموليتر — يعني شغّل الباك اند على جهازك عادي وهيتوصل تلقائيًا.
-لو هتجرب على جهاز حقيقي أو هتنشر السيرفر، غيّر الـ `baseUrl` لعنوان السيرفر الفعلي (IP أو دومين).
+للتجربة على جهاز حقيقي أو الإنتاج، غيّره لعنوان السيرفر الفعلي.
+
+## نظام رفع الصور
+```
+Flutter/الموقع
+    ↓  multipart POST /api/upload (أو /api/auth/register)
+Backend على Railway (multer.memoryStorage — Buffer فقط)
+    ↓  upload_stream
+Cloudinary (wasal/users, wasal/merchants, wasal/products, wasal/misc)
+    ↓  secure_url + public_id
+PostgreSQL (يحفظ الرابط في avatar_url / image_url / … + public_id في *_public_id)
+    ↓
+Flutter/الموقع يعرض الرابط مباشرة
+```
+
+- كل Endpoint لرفع الصور محفوظ نفسه: نفس الاسم، نفس الحقول، نفس الاستجابة.
+- عند تغيير صورة أو حذف عنصر، بنحذف الصورة القديمة من Cloudinary تلقائياً لو `public_id` معروف.
+- الصور القديمة اللي كانت `/uploads/...` بتفضل نصّها في DB بدون تعديل، بس روابطها هتبقى مكسورة
+  (وهي أصلاً بتضيع مع كل Redeploy على Railway حاليًا).
 
 ## هيكل المشروع
 ```
 src/
-  db.js              اتصال قاعدة البيانات + إنشاء الجداول + بيانات أولية (seed)
-  middleware/auth.js  JWT auth + التحقق من الأدوار (role-based access)
+  db.js                 اتصال قاعدة البيانات + إنشاء الجداول + Migrations آمنة
+  config/
+    cloudinary.js       إعداد Cloudinary + uploadBuffer + destroyByPublicId + extractPublicIdFromUrl
+  middleware/
+    auth.js             JWT auth + role-based access
+    uploader.js         multer.memoryStorage موحّد + fileFilter + error handler
   routes/
-    auth.js           تسجيل / دخول
-    categories.js      الفئات
-    merchants.js        المتاجر
-    products.js          المنتجات
-    cart.js               السلة (متجر واحد بالسلة في نفس الوقت)
-    orders.js             إنشاء/عرض الطلبات + تتبع الطلب (GET /orders/:id/track)
-    addresses.js          عناوين العميل (بتدعم lat/lng)
-    merchantPanel.js       لوحة التاجر (قبول الطلب، تجهيزه)
-    driverPanel.js          لوحة السائق (قبول، تسليم، تحديث الأونلاين، تحديث الموقع كل فترة)
-    admin.js                 لوحة الأدمن (يوزرز، متاجر، مناديب، طلبات)
-    upload.js                 رفع الصور (multipart) — بيرجع رابط الصورة
-    users.js                   تحديث بروفايل المستخدم (بما فيها الصورة الشخصية)
-    notifications.js            stub فاضي مؤقتًا (الإشعارات مؤجلة زي ما اتفقنا)
-  server.js                     نقطة التشغيل — بيجمع كل الـ routes
-uploads/                         الصور المرفوعة بتتخزن هنا وتتقدّم statically على /uploads/...
+    auth.js             تسجيل/دخول (بيرفع logo + صور البطاقة والسيلفي على Cloudinary)
+    upload.js           POST /api/upload — رفع صورة عامة على Cloudinary
+    users.js            تحديث/حذف البروفايل + تنظيف الصور من Cloudinary
+    merchantPanel.js    لوحة التاجر + تنظيف الصور من Cloudinary عند التغيير/الحذف
+    driverPanel.js      لوحة السائق
+    admin.js            لوحة الأدمن
+    merchants.js, products.js, cart.js, orders.js, addresses.js,
+    categories.js, notifications.js
+  server.js             نقطة التشغيل (مافيش /uploads static خلاص)
 ```
 
-## نقاط مهمة قبل ما تنشره فعليًا (production)
-- **الصور بتتخزن على القرص المحلي للسيرفر** — لو هتنشر على منصة زي Render/Railway بدون قرص دائم،
-  هتضيع الصور عند كل إعادة تشغيل. الحل: استخدم تخزين سحابي (S3, Cloudflare R2, Supabase Storage)
-  بدل `multer.diskStorage` في `routes/upload.js`.
-- **رسوم التوصيل** حاليًا رقم ثابت (`DELIVERY_FEE = 15`) في `routes/cart.js` — غيّره أو خليه ديناميكي
-  حسب المسافة لما تحب.
-- **السلة بتفترض متجر واحد بس في نفس الوقت** — لو العميل ضاف من متجر تاني، السلة القديمة بتتمسح
-  تلقائيًا (سلوك شائع في تطبيقات التوصيل، بس اعرفه).
-- **موافقة المتاجر والمناديب**: المتجر لما يتسجل بيبقى `status='pending'` ومش هيظهر للعملاء لحد
-  ما الأدمن يوافق عليه (`PUT /merchants/:id` بـ `status: 'approved'`). نفس الفكرة تقريبًا للمناديب
-  عبر `driver_status`.
-- **الإشعارات**: الـ endpoint موجود كـ stub بيرجع array فاضي عشان التطبيق مايحصلش فيه error، لسه
-  محتاج تنفيذ حقيقي (Firebase Cloud Messaging غالبًا) لما تيجي تضيفها.
+## نقاط مهمة قبل الإنتاج
+- **رسوم التوصيل** رقم ثابت `DELIVERY_FEE = 15` في `routes/cart.js` — غيّره أو خليه ديناميكي.
+- **السلة بتفترض متجر واحد بس** — لو العميل ضاف من متجر تاني، السلة القديمة بتتمسح تلقائيًا.
+- **موافقة المتاجر والمناديب**: التاجر/السائق بيبقى `pending` لحد ما الأدمن يوافق.
+- **الإشعارات**: الـ endpoint لسه stub، محتاج Firebase Cloud Messaging لما تحب تفعله.

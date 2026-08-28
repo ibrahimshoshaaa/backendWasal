@@ -1,6 +1,7 @@
 const express = require('express');
 const { query, createNotification } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { destroyByPublicId, extractPublicIdFromUrl } = require('../config/cloudinary');
 
 const router = express.Router();
 
@@ -12,6 +13,17 @@ async function myMerchantId(userId) {
 function notify(req, userId, payload) {
   createNotification(userId, payload).catch(() => {});
   req.app.locals.sendToUser?.(userId, { type: 'notification', ...payload });
+}
+
+// Helper: safe-delete على Cloudinary. بيقبل public_id مباشرة أو رابط،
+// وبيسكت أي خطأ (best-effort) عشان ما يكسرش الـ endpoint اللي بينده.
+function safeDestroy(publicIdOrUrl, fallbackUrl) {
+  const pid =
+    publicIdOrUrl && !publicIdOrUrl.startsWith('http')
+      ? publicIdOrUrl
+      : extractPublicIdFromUrl(publicIdOrUrl || fallbackUrl);
+  if (!pid) return;
+  destroyByPublicId(pid).catch(() => {});
 }
 
 // ─── GET /api/merchant/orders ─────────────────────────────────────────────────
@@ -153,15 +165,12 @@ router.put('/orders/:id/ready', requireAuth, requireRole('merchant'), async (req
     if (!rows.length) return res.status(404).json({ error: 'الطلب غير موجود' });
 
     const order = rows[0];
-    // Notify customer
     notify(req, order.customer_id, {
       title: 'طلبك جاهز! 🎁',
       body: `طلبك رقم ${order.order_number} جاهز وفي انتظار المندوب`,
       type: 'order_ready',
       orderId: order.id,
     });
-    // Notify all online drivers via broadcast (driver_id unknown yet)
-    // Drivers will see it via polling or WS broadcast handled separately
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'فشل تحديث حالة الطلب' });
@@ -179,10 +188,24 @@ router.get('/profile', requireAuth, requireRole('merchant'), async (req, res) =>
   }
 });
 
+// PUT /api/merchant/profile
+// لو Flutter/الموقع بعت image_url أو cover_image_url جديد (بعد ما رفعه بـ POST /api/upload)،
+// بنستبدل الرابط في DB وبنحذف الصورة القديمة من Cloudinary.
 router.put('/profile', requireAuth, requireRole('merchant'), async (req, res) => {
   try {
     const merchantId = await myMerchantId(req.userId);
     if (!merchantId) return res.status(404).json({ error: 'لا يوجد متجر مرتبط بحسابك' });
+
+    // نجيب القيم القديمة عشان نعرف نحذف الصور القديمة من Cloudinary.
+    let oldRow = null;
+    if (req.body.image_url !== undefined || req.body.cover_image_url !== undefined) {
+      const { rows: oldRows } = await query(
+        `SELECT image_url, image_public_id, cover_image_url, cover_image_public_id
+         FROM merchants WHERE id=$1`,
+        [merchantId]
+      );
+      oldRow = oldRows[0] || null;
+    }
 
     const fields = ['name', 'image_url', 'cover_image_url', 'address', 'phone', 'tags',
                     'is_open', 'hours_note', 'delivery_fee', 'delivery_time_minutes', 'min_order'];
@@ -194,12 +217,42 @@ router.put('/profile', requireAuth, requireRole('merchant'), async (req, res) =>
         updates.push(`${f}=$${params.length}`);
       }
     }
+
+    // لو الـ URL اتغيّر، نصفّر public_id القديم عشان ما يفضلش يشير لصورة اتحذفت.
+    if (req.body.image_url !== undefined) {
+      params.push(null);
+      updates.push(`image_public_id=$${params.length}`);
+    }
+    if (req.body.cover_image_url !== undefined) {
+      params.push(null);
+      updates.push(`cover_image_public_id=$${params.length}`);
+    }
+
     if (!updates.length) return res.status(400).json({ error: 'لا يوجد بيانات للتحديث' });
     params.push(merchantId);
     const { rows } = await query(
       `UPDATE merchants SET ${updates.join(', ')} WHERE id=$${params.length} RETURNING *`,
       params
     );
+
+    // Cleanup الصور القديمة من Cloudinary (best-effort).
+    if (oldRow) {
+      if (
+        req.body.image_url !== undefined &&
+        oldRow.image_url &&
+        oldRow.image_url !== req.body.image_url
+      ) {
+        safeDestroy(oldRow.image_public_id, oldRow.image_url);
+      }
+      if (
+        req.body.cover_image_url !== undefined &&
+        oldRow.cover_image_url &&
+        oldRow.cover_image_url !== req.body.cover_image_url
+      ) {
+        safeDestroy(oldRow.cover_image_public_id, oldRow.cover_image_url);
+      }
+    }
+
     res.json(rows[0]);
   } catch (err) {
     res.status(500).json({ error: 'فشل تحديث بيانات المتجر' });
@@ -237,15 +290,31 @@ router.post('/products', requireAuth, requireRole('merchant'), async (req, res) 
   }
 });
 
+// PUT /api/merchant/products/:id
+// نفس منطق تحديث المتجر: لو الـ image_url اتغيّر، بنحذف القديمة من Cloudinary.
 router.put('/products/:id', requireAuth, requireRole('merchant'), async (req, res) => {
   try {
     const merchantId = await myMerchantId(req.userId);
     if (!merchantId) return res.status(404).json({ error: 'لا يوجد متجر مرتبط بحسابك' });
+
+    let oldRow = null;
+    if (req.body.image_url !== undefined) {
+      const { rows: oldRows } = await query(
+        `SELECT image_url, image_public_id FROM products WHERE id=$1 AND merchant_id=$2`,
+        [req.params.id, merchantId]
+      );
+      oldRow = oldRows[0] || null;
+    }
+
     const fields = ['name', 'price', 'image_url', 'description', 'category', 'is_available'];
     const updates = [];
     const params = [];
     for (const f of fields) {
       if (req.body[f] !== undefined) { params.push(req.body[f]); updates.push(`${f}=$${params.length}`); }
+    }
+    if (req.body.image_url !== undefined) {
+      params.push(null);
+      updates.push(`image_public_id=$${params.length}`);
     }
     if (!updates.length) return res.status(400).json({ error: 'لا يوجد بيانات للتحديث' });
     params.push(req.params.id, merchantId);
@@ -255,20 +324,44 @@ router.put('/products/:id', requireAuth, requireRole('merchant'), async (req, re
       params
     );
     if (!rows.length) return res.status(404).json({ error: 'المنتج غير موجود' });
+
+    if (
+      oldRow &&
+      req.body.image_url !== undefined &&
+      oldRow.image_url &&
+      oldRow.image_url !== req.body.image_url
+    ) {
+      safeDestroy(oldRow.image_public_id, oldRow.image_url);
+    }
+
     res.json(rows[0]);
   } catch (err) {
     res.status(500).json({ error: 'فشل تحديث المنتج' });
   }
 });
 
+// DELETE /api/merchant/products/:id
+// بنمسح المنتج ونمسح صورته من Cloudinary لو معروفة.
 router.delete('/products/:id', requireAuth, requireRole('merchant'), async (req, res) => {
   try {
     const merchantId = await myMerchantId(req.userId);
     if (!merchantId) return res.status(404).json({ error: 'لا يوجد متجر مرتبط بحسابك' });
+
+    // نجيب صورة المنتج قبل الحذف عشان نقدر ننضّفها من Cloudinary.
+    const { rows: prodRows } = await query(
+      `SELECT image_url, image_public_id FROM products WHERE id=$1 AND merchant_id=$2`,
+      [req.params.id, merchantId]
+    );
+
     const { rowCount } = await query(
       'DELETE FROM products WHERE id=$1 AND merchant_id=$2', [req.params.id, merchantId]
     );
     if (!rowCount) return res.status(404).json({ error: 'المنتج غير موجود' });
+
+    if (prodRows.length) {
+      safeDestroy(prodRows[0].image_public_id, prodRows[0].image_url);
+    }
+
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'فشل حذف المنتج' });

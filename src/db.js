@@ -32,6 +32,14 @@ async function initSchema() {
     );
   `);
 
+  // ── أعمدة public_id لصور المستخدمين — Migration آمنة (IF NOT EXISTS) ─────────
+  // بنحفظ public_id جنب كل رابط عشان نقدر نحذف الصورة القديمة من Cloudinary
+  // لما المستخدم يستبدلها. الأعمدة اختيارية (nullable) ومش بتكسر أي endpoint قديم.
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_public_id TEXT`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS id_front_public_id TEXT`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS id_back_public_id TEXT`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS selfie_public_id TEXT`);
+
   await query(`
     CREATE TABLE IF NOT EXISTS categories (
       id SERIAL PRIMARY KEY,
@@ -70,6 +78,10 @@ async function initSchema() {
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS delivery_time_minutes INT NOT NULL DEFAULT 30`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2) NOT NULL DEFAULT 0`);
 
+  // ── أعمدة public_id للمتاجر (logo + cover) ───────────────────────────────────
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS image_public_id TEXT`);
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS cover_image_public_id TEXT`);
+
   await query(`
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
@@ -84,6 +96,9 @@ async function initSchema() {
   `);
 
   await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT`);
+
+  // ── عمود public_id لصور المنتجات ─────────────────────────────────────────────
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS image_public_id TEXT`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS addresses (

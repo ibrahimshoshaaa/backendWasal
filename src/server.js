@@ -1,7 +1,6 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 
@@ -24,7 +23,12 @@ const notificationsRoutes = require('./routes/notifications');
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+
+// ملاحظة: تم حذف app.use('/uploads', express.static(...))
+// كل الصور الجديدة بترفع لـ Cloudinary وبتترجع بروابط secure_url كاملة،
+// فمافيش داعي لتقديم أي حاجة static من قرص السيرفر.
+// الصور القديمة اللي روابطها كانت /uploads/... مش هترجع من هنا — لو لسه
+// موجودة في قاعدة البيانات هتظهر مكسورة (نفس الوضع الحالي بعد أول Redeploy).
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 

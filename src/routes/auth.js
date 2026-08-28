@@ -1,34 +1,20 @@
+// ─── Auth routes (register / login) ───────────────────────────────────────────
+// التسجيل بيدعم multipart/form-data عشان يحمل صور logo المتجر أو صور بطاقة
+// السائق + السيلفي في نفس الطلب. الصور دي بترفع مباشرة لـ Cloudinary بدل
+// ما تتخزن على قرص السيرفر (اللي بيتمسح مع أي Redeploy على Railway).
+//
+// شكل الاستجابة والحقول والـ endpoints نفسها بالظبط — Flutter والموقع ما يتأثروش.
+
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const multer = require('multer');
-const path = require('path');
-const crypto = require('crypto');
 const { query } = require('../db');
 const { signToken } = require('../middleware/auth');
+const { upload, multerErrorHandler } = require('../middleware/uploader');
+const { uploadBuffer } = require('../config/cloudinary');
 
 const router = express.Router();
 
-const storage = multer.diskStorage({
-  destination: path.join(__dirname, '..', '..', 'uploads'),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '.jpg';
-    cb(null, `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`);
-  },
-});
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 8 * 1024 * 1024 }, // 8MB per file
-  fileFilter: (req, file, cb) => {
-    if (!file.mimetype.startsWith('image/')) {
-      return cb(new Error('الملف لازم يكون صورة'));
-    }
-    cb(null, true);
-  },
-});
-
-// Registration accepts multipart/form-data so it can carry the store logo
-// or the driver's ID/selfie photos in the same request as the form fields.
+// نفس الحقول القديمة بالظبط.
 const registerUpload = upload.fields([
   { name: 'logo', maxCount: 1 },
   { name: 'id_front', maxCount: 1 },
@@ -47,10 +33,12 @@ function publicUser(row) {
   };
 }
 
-function fileUrl(req, file) {
-  if (!file) return null;
-  const base = process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
-  return `${base}/uploads/${file.filename}`;
+// Helper: يرفع ملف واحد لـ Cloudinary لو موجود، ويرجع { url, public_id } أو null.
+// بيرمي error بس لو Cloudinary فشل — عشان الـ handler يمسكه ويرجع 500 نظيف.
+async function uploadOrNull(file, folder) {
+  if (!file || !file.buffer) return null;
+  const r = await uploadBuffer(file.buffer, { folder });
+  return { url: r.url, public_id: r.public_id };
 }
 
 router.post('/register', registerUpload, async (req, res) => {
@@ -75,13 +63,31 @@ router.post('/register', registerUpload, async (req, res) => {
     const { rows: existing } = await query('SELECT id FROM users WHERE email=$1', [email]);
     if (existing.length) return res.status(400).json({ error: 'الإيميل ده مستخدم قبل كده' });
 
+    // نرفع كل الصور بالتوازي على Cloudinary قبل أي INSERT — لو حاجة فشلت،
+    // ما بنعملش user ناقص الصور.
+    let logoUp, idFrontUp, idBackUp, selfieUp;
+    try {
+      [logoUp, idFrontUp, idBackUp, selfieUp] = await Promise.all([
+        uploadOrNull(logoFile, 'wasal/merchants/logos'),
+        uploadOrNull(idFrontFile, 'wasal/users/documents'),
+        uploadOrNull(idBackFile, 'wasal/users/documents'),
+        uploadOrNull(selfieFile, 'wasal/users/documents'),
+      ]);
+    } catch (upErr) {
+      console.error('[auth/register] Cloudinary upload failed:', upErr.message);
+      return res.status(500).json({ error: 'فشل رفع الصور، حاول تاني' });
+    }
+
     const hash = await bcrypt.hash(password, 10);
     const { rows } = await query(
       `INSERT INTO users (
          full_name, email, password_hash, phone, role,
-         national_id, vehicle_type, id_front_url, id_back_url, selfie_url
+         national_id, vehicle_type,
+         id_front_url, id_front_public_id,
+         id_back_url, id_back_public_id,
+         selfie_url, selfie_public_id
        )
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
       [
         full_name,
         email,
@@ -90,9 +96,12 @@ router.post('/register', registerUpload, async (req, res) => {
         finalRole,
         req.body.national_id || null,
         req.body.vehicle_type || null,
-        fileUrl(req, idFrontFile),
-        fileUrl(req, idBackFile),
-        fileUrl(req, selfieFile),
+        idFrontUp?.url || null,
+        idFrontUp?.public_id || null,
+        idBackUp?.url || null,
+        idBackUp?.public_id || null,
+        selfieUp?.url || null,
+        selfieUp?.public_id || null,
       ]
     );
     const user = rows[0];
@@ -107,12 +116,13 @@ router.post('/register', registerUpload, async (req, res) => {
         }
       }
       await query(
-        `INSERT INTO merchants (owner_user_id, name, image_url, address, phone, tags)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
+        `INSERT INTO merchants (owner_user_id, name, image_url, image_public_id, address, phone, tags)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
         [
           user.id,
           req.body.store_name || full_name,
-          fileUrl(req, logoFile),
+          logoUp?.url || null,
+          logoUp?.public_id || null,
           req.body.store_address || null,
           phone || null,
           JSON.stringify(tags),
@@ -168,5 +178,8 @@ router.post('/login', async (req, res) => {
     res.status(500).json({ error: 'حدث خطأ غير متوقع' });
   }
 });
+
+// أخطاء multer (حجم الملف / نوع الملف) بترجع رسائل واضحة بالعربي.
+router.use(multerErrorHandler);
 
 module.exports = { router, publicUser };
