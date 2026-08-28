@@ -190,10 +190,18 @@ router.post('/:id/rate', requireAuth, async (req, res) => {
 
     const { rows } = await query(
       `UPDATE orders SET rating=$1, rating_comment=$2
-       WHERE id=$3 AND customer_id=$4 AND status='delivered' RETURNING *`,
+       WHERE id=$3 AND customer_id=$4 AND status='delivered' AND rating IS NULL RETURNING *`,
       [rating, comment || null, req.params.id, req.userId]
     );
     if (!rows.length) {
+      // Distinguish "already rated" from "can't be rated" so the customer gets a clear message.
+      const { rows: existing } = await query(
+        'SELECT rating FROM orders WHERE id=$1 AND customer_id=$2',
+        [req.params.id, req.userId]
+      );
+      if (existing.length && existing[0].rating !== null) {
+        return res.status(400).json({ error: 'تم تقييم هذا الطلب من قبل' });
+      }
       return res.status(400).json({ error: 'لا يمكن تقييم هذا الطلب' });
     }
     res.json({ ok: true });

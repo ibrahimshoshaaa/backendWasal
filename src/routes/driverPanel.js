@@ -17,7 +17,9 @@ router.get('/orders', requireAuth, requireRole('driver'), async (req, res) => {
               m.address AS merchant_address,
               u.full_name AS customer_name,
               u.phone AS customer_phone,
-              a.address_text AS delivery_address
+              a.address_text AS delivery_address,
+              a.lat AS delivery_lat,
+              a.lng AS delivery_lng
        FROM orders o
        LEFT JOIN merchants m ON m.id = o.merchant_id
        LEFT JOIN users u ON u.id = o.customer_id
@@ -41,7 +43,9 @@ router.get('/orders/history', requireAuth, requireRole('driver'), async (req, re
               m.address AS merchant_address,
               u.full_name AS customer_name,
               u.phone AS customer_phone,
-              a.address_text AS delivery_address
+              a.address_text AS delivery_address,
+              a.lat AS delivery_lat,
+              a.lng AS delivery_lng
        FROM orders o
        LEFT JOIN merchants m ON m.id = o.merchant_id
        LEFT JOIN users u ON u.id = o.customer_id
