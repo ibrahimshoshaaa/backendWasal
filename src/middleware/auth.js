@@ -6,6 +6,19 @@ function signToken(user) {
   return jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
 }
 
+// Used by the WebSocket handshake (see server.js) to validate the token a
+// client sends in its { type: 'auth', token } message. Returns the decoded
+// payload ({ id, role }) or null if the token is missing/invalid/expired —
+// callers should treat null the same as "not authenticated".
+function verifyToken(token) {
+  if (!token) return null;
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch (_) {
+    return null;
+  }
+}
+
 function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
@@ -28,17 +41,6 @@ function requireRole(...roles) {
     }
     next();
   };
-}
-
-// Used by the WebSocket handshake (server.js) to authenticate the
-// 'auth' message, outside of the normal Express request/response cycle.
-// Returns the decoded payload ({ id, role }) or null if invalid/expired.
-function verifyToken(token) {
-  try {
-    return jwt.verify(token, JWT_SECRET);
-  } catch (_) {
-    return null;
-  }
 }
 
 module.exports = { signToken, verifyToken, requireAuth, requireRole, JWT_SECRET };

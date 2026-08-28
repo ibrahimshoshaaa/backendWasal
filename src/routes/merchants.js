@@ -36,7 +36,17 @@ router.get('/:id', async (req, res) => {
       'SELECT * FROM products WHERE merchant_id=$1 AND is_available=true ORDER BY category NULLS LAST, id DESC',
       [req.params.id]
     );
-    res.json({ ...rows[0], products });
+    const { rows: ratingRows } = await query(
+      `SELECT COALESCE(AVG(rating), 0) AS avg_rating, COUNT(rating) AS rating_count
+       FROM orders WHERE merchant_id=$1 AND rating IS NOT NULL`,
+      [req.params.id]
+    );
+    res.json({
+      ...rows[0],
+      products,
+      avg_rating: Number(ratingRows[0].avg_rating),
+      rating_count: Number(ratingRows[0].rating_count),
+    });
   } catch (err) {
     console.error('GET /merchants/:id error:', err);
     res.status(500).json({ error: 'تعذر تحميل بيانات المتجر' });

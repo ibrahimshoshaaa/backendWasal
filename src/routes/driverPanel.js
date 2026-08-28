@@ -33,6 +33,91 @@ router.get('/orders', requireAuth, requireRole('driver'), async (req, res) => {
   }
 });
 
+router.get('/orders/history', requireAuth, requireRole('driver'), async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT o.*,
+              m.name AS merchant_name,
+              m.address AS merchant_address,
+              u.full_name AS customer_name,
+              u.phone AS customer_phone,
+              a.address_text AS delivery_address
+       FROM orders o
+       LEFT JOIN merchants m ON m.id = o.merchant_id
+       LEFT JOIN users u ON u.id = o.customer_id
+       LEFT JOIN addresses a ON a.id = o.address_id
+       WHERE o.driver_id=$1 AND o.status='delivered'
+       ORDER BY o.delivered_at DESC
+       LIMIT 100`,
+      [req.userId]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحميل سجل التوصيل' });
+  }
+});
+
+router.get('/stats', requireAuth, requireRole('driver'), async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT
+         COUNT(*) FILTER (WHERE delivered_at::date = CURRENT_DATE) AS today_count,
+         COALESCE(SUM(delivery_fee) FILTER (WHERE delivered_at::date = CURRENT_DATE), 0) AS today_earnings,
+         COUNT(*) FILTER (WHERE delivered_at >= now() - interval '7 days') AS week_count,
+         COALESCE(SUM(delivery_fee) FILTER (WHERE delivered_at >= now() - interval '7 days'), 0) AS week_earnings,
+         COUNT(*) AS total_count,
+         COALESCE(SUM(delivery_fee), 0) AS total_earnings
+       FROM orders
+       WHERE driver_id=$1 AND status='delivered'`,
+      [req.userId]
+    );
+    const r = rows[0];
+    res.json({
+      today: { count: Number(r.today_count), earnings: Number(r.today_earnings) },
+      week: { count: Number(r.week_count), earnings: Number(r.week_earnings) },
+      total: { count: Number(r.total_count), earnings: Number(r.total_earnings) },
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحميل الإحصائيات' });
+  }
+});
+
+router.get('/profile', requireAuth, requireRole('driver'), async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT id, full_name, email, phone, avatar_url, national_id, vehicle_type,
+              driver_status, is_online
+       FROM users WHERE id=$1`,
+      [req.userId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'المستخدم غير موجود' });
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحميل البيانات' });
+  }
+});
+
+router.put('/profile', requireAuth, requireRole('driver'), async (req, res) => {
+  try {
+    const fields = ['full_name', 'phone', 'vehicle_type', 'avatar_url'];
+    const updates = [];
+    const params = [];
+    for (const f of fields) {
+      if (req.body[f] !== undefined) { params.push(req.body[f]); updates.push(`${f}=$${params.length}`); }
+    }
+    if (!updates.length) return res.status(400).json({ error: 'لا يوجد بيانات للتحديث' });
+    params.push(req.userId);
+    const { rows } = await query(
+      `UPDATE users SET ${updates.join(', ')} WHERE id=$${params.length}
+       RETURNING id, full_name, email, phone, avatar_url, national_id, vehicle_type, driver_status, is_online`,
+      params
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحديث البيانات' });
+  }
+});
+
 router.get('/status', requireAuth, requireRole('driver'), async (req, res) => {
   try {
     const { rows } = await query('SELECT is_online FROM users WHERE id=$1', [req.userId]);

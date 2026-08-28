@@ -54,6 +54,8 @@ async function initSchema() {
       status TEXT NOT NULL DEFAULT 'pending',
       tags JSONB,
       is_open BOOLEAN NOT NULL DEFAULT true,
+      hours_note TEXT,
+      cover_image_url TEXT,
       delivery_fee NUMERIC(10,2) NOT NULL DEFAULT 20,
       delivery_time_minutes INT NOT NULL DEFAULT 30,
       min_order NUMERIC(10,2) NOT NULL DEFAULT 0
@@ -62,6 +64,8 @@ async function initSchema() {
 
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS tags JSONB`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS is_open BOOLEAN NOT NULL DEFAULT true`);
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS hours_note TEXT`);
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS cover_image_url TEXT`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS delivery_fee NUMERIC(10,2) NOT NULL DEFAULT 20`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS delivery_time_minutes INT NOT NULL DEFAULT 30`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2) NOT NULL DEFAULT 0`);

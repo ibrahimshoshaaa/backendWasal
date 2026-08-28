@@ -6,6 +6,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const { initSchema } = require('./db');
+const { verifyToken } = require('./middleware/auth');
 const { router: authRoutes } = require('./routes/auth');
 const categoriesRoutes = require('./routes/categories');
 const merchantsRoutes = require('./routes/merchants');
@@ -74,7 +75,6 @@ function sendToUser(userId, event) {
 
 wss.on('connection', (ws, req) => {
   // Client authenticates by sending: { type: 'auth', token: '...' }
-  const { verifyToken } = require('./middleware/auth');
   let userId = null;
 
   ws.on('message', (raw) => {
@@ -87,7 +87,9 @@ wss.on('connection', (ws, req) => {
         registerClient(userId, ws);
         ws.send(JSON.stringify({ type: 'auth_ok' }));
       }
-    } catch (_) {}
+    } catch (err) {
+      console.error('WS message error:', err.message);
+    }
   });
 
   ws.on('close', () => {

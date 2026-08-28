@@ -37,6 +37,59 @@ router.get('/orders', requireAuth, requireRole('merchant'), async (req, res) => 
   }
 });
 
+// ─── GET /api/merchant/orders/history ─────────────────────────────────────────
+router.get('/orders/history', requireAuth, requireRole('merchant'), async (req, res) => {
+  try {
+    const merchantId = await myMerchantId(req.userId);
+    if (!merchantId) return res.json([]);
+    const { rows } = await query(
+      `SELECT o.*,
+              u.full_name AS customer_name,
+              u.phone AS customer_phone,
+              a.address_text AS delivery_address
+       FROM orders o
+       LEFT JOIN users u ON u.id = o.customer_id
+       LEFT JOIN addresses a ON a.id = o.address_id
+       WHERE o.merchant_id=$1 AND o.status IN ('delivered','cancelled')
+       ORDER BY o.created_at DESC
+       LIMIT 100`,
+      [merchantId]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحميل سجل الطلبات' });
+  }
+});
+
+// ─── GET /api/merchant/stats ───────────────────────────────────────────────────
+router.get('/stats', requireAuth, requireRole('merchant'), async (req, res) => {
+  try {
+    const merchantId = await myMerchantId(req.userId);
+    if (!merchantId) return res.json({ today: { count: 0, revenue: 0 }, week: { count: 0, revenue: 0 }, total: { count: 0, revenue: 0 } });
+
+    const { rows } = await query(
+      `SELECT
+         COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE) AS today_count,
+         COALESCE(SUM(subtotal) FILTER (WHERE created_at::date = CURRENT_DATE), 0) AS today_revenue,
+         COUNT(*) FILTER (WHERE created_at >= now() - interval '7 days') AS week_count,
+         COALESCE(SUM(subtotal) FILTER (WHERE created_at >= now() - interval '7 days'), 0) AS week_revenue,
+         COUNT(*) AS total_count,
+         COALESCE(SUM(subtotal), 0) AS total_revenue
+       FROM orders
+       WHERE merchant_id=$1 AND status='delivered'`,
+      [merchantId]
+    );
+    const r = rows[0];
+    res.json({
+      today: { count: Number(r.today_count), revenue: Number(r.today_revenue) },
+      week: { count: Number(r.week_count), revenue: Number(r.week_revenue) },
+      total: { count: Number(r.total_count), revenue: Number(r.total_revenue) },
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحميل الإحصائيات' });
+  }
+});
+
 // ─── PUT /api/merchant/orders/:id/accept ──────────────────────────────────────
 router.put('/orders/:id/accept', requireAuth, requireRole('merchant'), async (req, res) => {
   try {
@@ -131,8 +184,8 @@ router.put('/profile', requireAuth, requireRole('merchant'), async (req, res) =>
     const merchantId = await myMerchantId(req.userId);
     if (!merchantId) return res.status(404).json({ error: 'لا يوجد متجر مرتبط بحسابك' });
 
-    const fields = ['name', 'image_url', 'address', 'phone', 'tags', 'is_open',
-                    'delivery_fee', 'delivery_time_minutes', 'min_order'];
+    const fields = ['name', 'image_url', 'cover_image_url', 'address', 'phone', 'tags',
+                    'is_open', 'hours_note', 'delivery_fee', 'delivery_time_minutes', 'min_order'];
     const updates = [];
     const params = [];
     for (const f of fields) {
