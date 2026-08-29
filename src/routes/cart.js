@@ -3,7 +3,9 @@ const { query } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
-const DELIVERY_FEE = 15;
+// Fallback فقط لو المتجر مالوش delivery_fee متسجل لأي سبب — القيمة الحقيقية
+// بتتجاب من جدول merchants لكل تاجر على حدة.
+const DEFAULT_DELIVERY_FEE = 15;
 
 async function buildCartResponse(userId) {
   const { rows } = await query(
@@ -25,7 +27,17 @@ async function buildCartResponse(userId) {
 
   const total = items.reduce((sum, it) => sum + it.price * it.quantity, 0);
   const merchantId = rows.length ? rows[0].merchant_id : null;
-  const deliveryFee = items.length ? DELIVERY_FEE : 0;
+
+  let deliveryFee = 0;
+  if (items.length && merchantId) {
+    const { rows: merchantRows } = await query(
+      'SELECT delivery_fee FROM merchants WHERE id=$1',
+      [merchantId]
+    );
+    deliveryFee = merchantRows.length
+      ? Number(merchantRows[0].delivery_fee)
+      : DEFAULT_DELIVERY_FEE;
+  }
 
   return {
     merchant_id: merchantId,
