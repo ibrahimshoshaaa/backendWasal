@@ -19,6 +19,7 @@ const adminRoutes = require('./routes/admin');
 const uploadRoutes = require('./routes/upload');
 const usersRoutes = require('./routes/users');
 const notificationsRoutes = require('./routes/notifications');
+const deviceTokensRoutes = require('./routes/deviceTokens');
 
 const app = express();
 app.use(cors());
@@ -45,6 +46,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/notifications', notificationsRoutes);
+app.use('/api/devices', deviceTokensRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err);

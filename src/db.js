@@ -183,6 +183,17 @@ async function initSchema() {
     );
   `);
 
+  // ── توكنات FCM لأجهزة المستخدمين — بيتسجّل توكن لكل موبايل بعد تسجيل الدخول ─
+  await query(`
+    CREATE TABLE IF NOT EXISTS device_tokens (
+      id SERIAL PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token TEXT UNIQUE NOT NULL,
+      platform TEXT DEFAULT 'android',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+
   await seed();
 }
 
@@ -209,13 +220,35 @@ async function seed() {
   }
 }
 
-// Helper: create notification for a user
+// Helper: create notification for a user (DB + FCM push لكل أجهزته)
 async function createNotification(userId, { title, body, type, orderId }) {
   await query(
     `INSERT INTO notifications (user_id, title, body, type, order_id)
      VALUES ($1, $2, $3, $4, $5)`,
     [userId, title, body, type || null, orderId || null]
   );
+
+  // Push عبر FCM — Best effort: أي فشل هنا مش بيوقف الإشعار الأساسي
+  try {
+    const { sendPushToTokens } = require('./config/firebase');
+    const { rows } = await query(
+      'SELECT token FROM device_tokens WHERE user_id=$1', [userId]
+    );
+    const tokens = rows.map((r) => r.token);
+    if (tokens.length) {
+      const r = await sendPushToTokens(tokens, {
+        title,
+        body,
+        data: { type: type || '', orderId: orderId || '' },
+      });
+      // نظّف التوكنات الميتة (المستخدم مسح التطبيق مثلاً)
+      if (r.removed && r.removed.length) {
+        await query('DELETE FROM device_tokens WHERE token = ANY($1)', [r.removed]);
+      }
+    }
+  } catch (e) {
+    console.error('[fcm] push failed:', e.message);
+  }
 }
 
 module.exports = { pool, query, initSchema, createNotification };
