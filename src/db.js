@@ -82,6 +82,10 @@ async function initSchema() {
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS image_public_id TEXT`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS cover_image_public_id TEXT`);
 
+  // ── موقع المتجر (lat/lng) — عشان المندوب يقدر يفتح نقطة الاستلام على الخريطة ─
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION`);
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION`);
+
   await query(`
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,

@@ -208,7 +208,8 @@ router.put('/profile', requireAuth, requireRole('merchant'), async (req, res) =>
     }
 
     const fields = ['name', 'image_url', 'cover_image_url', 'address', 'phone', 'tags',
-                    'is_open', 'hours_note', 'delivery_fee', 'delivery_time_minutes', 'min_order'];
+                    'is_open', 'hours_note', 'delivery_fee', 'delivery_time_minutes', 'min_order',
+                    'lat', 'lng'];
     const updates = [];
     const params = [];
     for (const f of fields) {

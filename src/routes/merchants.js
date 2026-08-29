@@ -55,7 +55,9 @@ router.get('/:id', async (req, res) => {
 
 router.put('/:id', requireAuth, requireRole('admin'), async (req, res) => {
   try {
-    const fields = ['name', 'category_id', 'image_url', 'address', 'phone', 'status', 'tags'];
+    const fields = ['name', 'category_id', 'image_url', 'cover_image_url', 'address', 'phone',
+                    'status', 'tags', 'is_open', 'hours_note', 'delivery_fee',
+                    'delivery_time_minutes', 'min_order', 'lat', 'lng'];
     const updates = [];
     const params = [];
     for (const f of fields) {
