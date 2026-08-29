@@ -121,10 +121,13 @@ router.get('/:id/track', requireAuth, async (req, res) => {
               o.accepted_at, o.ready_at, o.picked_up_at, o.delivered_at,
               u.driver_lat, u.driver_lng,
               u.full_name AS driver_name, u.phone AS driver_phone,
-              m.name AS merchant_name, m.address AS merchant_address
+              m.name AS merchant_name, m.address AS merchant_address,
+              m.lat AS merchant_lat, m.lng AS merchant_lng,
+              a.lat AS delivery_lat, a.lng AS delivery_lng
        FROM orders o
        LEFT JOIN users u ON u.id = o.driver_id
        LEFT JOIN merchants m ON m.id = o.merchant_id
+       LEFT JOIN addresses a ON a.id = o.address_id
        WHERE o.id=$1`,
       [req.params.id]
     );
