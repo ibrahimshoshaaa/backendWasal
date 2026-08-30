@@ -407,19 +407,20 @@ router.post('/ads', async (req, res) => {
   try {
     const {
       title, image_url, link_type, link_target_id, link_url,
-      region, start_at, end_at, is_active, sort_order,
+      region, start_at, end_at, is_active, sort_order, slide_duration,
     } = req.body || {};
     if (!title || !image_url) {
       return res.status(400).json({ error: 'العنوان والصورة مطلوبين' });
     }
     const { rows } = await query(
       `INSERT INTO ads (title, image_url, link_type, link_target_id, link_url,
-                         region, start_at, end_at, is_active, sort_order)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+                         region, start_at, end_at, is_active, sort_order, slide_duration)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
       [
         title, image_url, link_type || 'none', link_target_id || null, link_url || null,
         region || null, start_at || null, end_at || null,
         is_active === undefined ? true : is_active, sort_order || 0,
+        slide_duration || 5,
       ]
     );
     res.json(rows[0]);
@@ -432,7 +433,7 @@ router.post('/ads', async (req, res) => {
 router.put('/ads/:id', async (req, res) => {
   try {
     const fields = ['title', 'image_url', 'link_type', 'link_target_id', 'link_url',
-                    'region', 'start_at', 'end_at', 'is_active', 'sort_order'];
+                    'region', 'start_at', 'end_at', 'is_active', 'sort_order', 'slide_duration'];
     const updates = [];
     const params = [];
     for (const f of fields) {
