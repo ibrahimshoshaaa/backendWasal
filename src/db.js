@@ -305,6 +305,27 @@ async function initSchema() {
   await query(`ALTER TABLE ads ADD COLUMN IF NOT EXISTS slide_duration INT NOT NULL DEFAULT 5`);
   await query(`CREATE INDEX IF NOT EXISTS idx_ads_active ON ads(is_active)`);
 
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS hataali_orders (
+      id            SERIAL PRIMARY KEY,
+      customer_id   INT NOT NULL REFERENCES users(id),
+      driver_id     INT REFERENCES users(id),
+      title         TEXT NOT NULL,
+      description   TEXT,
+      approx_price  NUMERIC(10,2),
+      source        TEXT,
+      delivery_fee  NUMERIC(10,2) NOT NULL DEFAULT 35,
+      delivery_address TEXT,
+      phone         TEXT,
+      status        TEXT NOT NULL DEFAULT 'pending_admin',
+      admin_note    TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await query(`ALTER TABLE hataali_orders ADD COLUMN IF NOT EXISTS driver_id INT REFERENCES users(id)`);
+  await ensureSettings();
   await seed();
 }
 
@@ -363,3 +384,19 @@ async function createNotification(userId, { title, body, type, orderId }) {
 }
 
 module.exports = { pool, query, initSchema, createNotification };
+
+// ─── App settings (hataali fee, etc.) ─────────────────────────────────────────
+// يتم استدعاؤه داخل initSchema
+async function ensureSettings() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+  `);
+  // Default hataali delivery fee = 35
+  await query(`
+    INSERT INTO app_settings (key, value) VALUES ('hataali_fee', '35')
+    ON CONFLICT (key) DO NOTHING
+  `);
+}
