@@ -325,6 +325,8 @@ async function initSchema() {
     )
   `);
   await query(`ALTER TABLE hataali_orders ADD COLUMN IF NOT EXISTS driver_id INT REFERENCES users(id)`);
+  await query(`ALTER TABLE hataali_orders ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION`);
+  await query(`ALTER TABLE hataali_orders ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION`);
   await ensureSettings();
   await seed();
 }

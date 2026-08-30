@@ -7,7 +7,7 @@ const router = express.Router();
 // POST /api/hataali — العميل يرسل طلب جديد
 router.post('/', async (req, res) => {
   try {
-    const { title, description, approx_price, source, delivery_address, phone } = req.body || {};
+    const { title, description, approx_price, source, delivery_address, phone, lat, lng } = req.body || {};
     if (!title) return res.status(400).json({ error: 'اسم الطلب مطلوب' });
 
     // جلب رسوم التوصيل من الإعدادات
@@ -16,10 +16,11 @@ router.post('/', async (req, res) => {
 
     const { rows } = await query(
       `INSERT INTO hataali_orders
-         (customer_id, title, description, approx_price, source, delivery_fee, delivery_address, phone)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+         (customer_id, title, description, approx_price, source, delivery_fee, delivery_address, phone, lat, lng)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
       [req.userId, title, description || null, approx_price || null,
-       source || null, fee, delivery_address || null, phone || null]
+       source || null, fee, delivery_address || null, phone || null,
+       lat || null, lng || null]
     );
 
     // إشعار للأدمن
@@ -44,7 +45,8 @@ router.post('/', async (req, res) => {
 router.get('/my', async (req, res) => {
   try {
     const { rows } = await query(
-      `SELECT h.*, d.full_name AS driver_name, d.phone AS driver_phone
+      `SELECT h.*, d.full_name AS driver_name, d.phone AS driver_phone,
+              d.driver_lat, d.driver_lng
        FROM hataali_orders h
        LEFT JOIN users d ON d.id = h.driver_id
        WHERE h.customer_id = $1
@@ -242,6 +244,31 @@ router.put('/settings', async (req, res) => {
   } catch (err) {
     console.error('PUT /hataali/settings error:', err);
     res.status(500).json({ error: 'تعذر تحديث الإعدادات' });
+  }
+});
+
+// ─── تتبع الطلب ────────────────────────────────────────────────────────────────
+// ملحوظة: لازم يفضل آخر route بالـ GET في الملف — لأنه wildcard (:id) وهيبلع
+// أي مسار تاني زي /available أو /settings لو اتحط قبلهم.
+router.get('/:id', async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT h.*, d.full_name AS driver_name, d.phone AS driver_phone,
+              d.driver_lat, d.driver_lng
+       FROM hataali_orders h
+       LEFT JOIN users d ON d.id = h.driver_id
+       WHERE h.id = $1`,
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'الطلب غير موجود' });
+    const order = rows[0];
+    if (order.customer_id !== req.userId && req.userRole !== 'admin') {
+      return res.status(403).json({ error: 'غير مصرح' });
+    }
+    res.json(order);
+  } catch (err) {
+    console.error('GET /hataali/:id error:', err);
+    res.status(500).json({ error: 'تعذر تحميل الطلب' });
   }
 });
 

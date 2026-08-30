@@ -186,16 +186,22 @@ router.put('/location', requireAuth, requireRole('driver'), async (req, res) => 
     }
     await query('UPDATE users SET driver_lat=$1, driver_lng=$2 WHERE id=$3', [lat, lng, req.userId]);
 
-    // Push live location to customer of active order
-    const { rows } = await query(
+    // Push live location to the customer of any active job — سواء كان
+    // طلب من متجر (orders) أو طلب هاتهالي (hataali_orders).
+    const sendToUser = req.app.locals.sendToUser;
+    const { rows: activeOrders } = await query(
       `SELECT customer_id FROM orders WHERE driver_id=$1 AND status='picked_up' LIMIT 1`,
       [req.userId]
     );
-    if (rows.length) {
-      req.app.locals.sendToUser?.(rows[0].customer_id, {
-        type: 'driver_location',
-        lat, lng,
-      });
+    if (activeOrders.length) {
+      sendToUser?.(activeOrders[0].customer_id, { type: 'driver_location', lat, lng });
+    }
+    const { rows: activeHataali } = await query(
+      `SELECT customer_id FROM hataali_orders WHERE driver_id=$1 AND status='picked_up' LIMIT 1`,
+      [req.userId]
+    );
+    if (activeHataali.length) {
+      sendToUser?.(activeHataali[0].customer_id, { type: 'driver_location', lat, lng });
     }
     res.json({ ok: true });
   } catch (err) {
