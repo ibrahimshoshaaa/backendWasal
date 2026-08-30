@@ -8,7 +8,7 @@ router.get('/', async (req, res) => {
   try {
     const { region } = req.query;
     const { rows } = await query(
-      `SELECT id, title, image_url, link_type, link_target_id, link_url
+      `SELECT id, title, image_url, link_type, link_target_id, link_url, slide_duration
        FROM ads
        WHERE is_active = true
          AND (start_at IS NULL OR start_at <= now())
