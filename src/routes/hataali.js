@@ -17,7 +17,7 @@ router.post('/', async (req, res) => {
     `INSERT INTO hataali_orders
        (customer_id, title, description, approx_price, source, delivery_fee, delivery_address, phone)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-    [req.user.id, title, description || null, approx_price || null,
+    [req.userId, title, description || null, approx_price || null,
      source || null, fee, delivery_address || null, phone || null]
   );
 
@@ -28,7 +28,7 @@ router.post('/', async (req, res) => {
     sendToUser(a.id, { type: 'notification', message: `طلب هاتهالي جديد: ${title}` });
     await query(
       `INSERT INTO notifications (user_id, title, body, type) VALUES ($1,$2,$3,'hataali')`,
-      [a.id, 'طلب هاتهالي جديد', `${req.user.full_name || 'عميل'} طلب: ${title}`]
+      [a.id, 'طلب هاتهالي جديد', `${'عميل'} طلب: ${title}`]
     );
   }
 
@@ -43,7 +43,7 @@ router.get('/my', async (req, res) => {
      LEFT JOIN users d ON d.id = h.driver_id
      WHERE h.customer_id = $1
      ORDER BY h.created_at DESC`,
-    [req.user.id]
+    [req.userId]
   );
   res.json(rows);
 });
@@ -52,7 +52,7 @@ router.get('/my', async (req, res) => {
 
 // GET /api/hataali/available — الطلبات المتاحة للمناديب (وافق عليها الأدمن)
 router.get('/available', async (req, res) => {
-  if (req.user.role !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
+  if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
   const { rows } = await query(
     `SELECT h.*, u.full_name AS customer_name
      FROM hataali_orders h
@@ -65,14 +65,14 @@ router.get('/available', async (req, res) => {
 
 // POST /api/hataali/:id/accept — المندوب يقبل الطلب
 router.post('/:id/accept', async (req, res) => {
-  if (req.user.role !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
+  if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
 
   const { rows } = await query(
     `UPDATE hataali_orders
      SET driver_id=$1, status='picked_up', updated_at=now()
      WHERE id=$2 AND status='approved' AND driver_id IS NULL
      RETURNING *`,
-    [req.user.id, req.params.id]
+    [req.userId, req.params.id]
   );
   if (!rows.length) return res.status(409).json({ error: 'الطلب غير متاح أو تم أخذه من مندوب آخر' });
 
@@ -90,14 +90,14 @@ router.post('/:id/accept', async (req, res) => {
 
 // POST /api/hataali/:id/deliver — المندوب يسلّم الطلب
 router.post('/:id/deliver', async (req, res) => {
-  if (req.user.role !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
+  if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
 
   const { rows } = await query(
     `UPDATE hataali_orders
      SET status='delivered', updated_at=now()
      WHERE id=$1 AND driver_id=$2 AND status='picked_up'
      RETURNING *`,
-    [req.params.id, req.user.id]
+    [req.params.id, req.userId]
   );
   if (!rows.length) return res.status(404).json({ error: 'الطلب مش موجود' });
 
@@ -116,7 +116,7 @@ router.post('/:id/deliver', async (req, res) => {
 
 // GET /api/hataali/admin/all — كل الطلبات للأدمن
 router.get('/admin/all', async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'للأدمن فقط' });
+  if (req.userRole !== 'admin') return res.status(403).json({ error: 'للأدمن فقط' });
   const { rows } = await query(
     `SELECT h.*,
             c.full_name AS customer_name, c.phone AS customer_phone,
@@ -131,7 +131,7 @@ router.get('/admin/all', async (req, res) => {
 
 // PUT /api/hataali/admin/:id — الأدمن يوافق أو يرفض أو يعدّل
 router.put('/admin/:id', async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'للأدمن فقط' });
+  if (req.userRole !== 'admin') return res.status(403).json({ error: 'للأدمن فقط' });
   const { status, delivery_fee, admin_note } = req.body || {};
   const allowed = ['approved', 'rejected'];
   if (status && !allowed.includes(status)) return res.status(400).json({ error: 'حالة غير صحيحة' });
@@ -167,14 +167,14 @@ router.put('/admin/:id', async (req, res) => {
 
 // GET /api/hataali/settings — رسوم التوصيل الافتراضية
 router.get('/settings', async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'للأدمن فقط' });
+  if (req.userRole !== 'admin') return res.status(403).json({ error: 'للأدمن فقط' });
   const { rows } = await query(`SELECT value FROM app_settings WHERE key='hataali_fee'`);
   res.json({ hataali_fee: parseFloat(rows[0]?.value || '35') });
 });
 
 // PUT /api/hataali/settings — الأدمن يعدّل رسوم التوصيل
 router.put('/settings', async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'للأدمن فقط' });
+  if (req.userRole !== 'admin') return res.status(403).json({ error: 'للأدمن فقط' });
   const { hataali_fee } = req.body || {};
   if (!hataali_fee || isNaN(hataali_fee)) return res.status(400).json({ error: 'رسوم غير صحيحة' });
   await query(`INSERT INTO app_settings (key,value) VALUES ('hataali_fee',$1)
