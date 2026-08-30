@@ -5,7 +5,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const { initSchema } = require('./db');
-const { verifyToken } = require('./middleware/auth');
+const { verifyToken, requireAuth } = require('./middleware/auth');
 const { router: authRoutes } = require('./routes/auth');
 const categoriesRoutes = require('./routes/categories');
 const merchantsRoutes = require('./routes/merchants');
@@ -50,7 +50,7 @@ app.use('/api/users', usersRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/devices', deviceTokensRoutes);
 app.use('/api/ads', adsRoutes);
-app.use('/api/hataali', verifyToken, hataaliRoutes);
+app.use('/api/hataali', requireAuth, hataaliRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err);
