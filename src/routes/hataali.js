@@ -58,6 +58,25 @@ router.get('/my', async (req, res) => {
   }
 });
 
+// GET /api/hataali/my-deliveries — طلبات المندوب اللي قبلها (بتاعته هو)
+router.get('/my-deliveries', async (req, res) => {
+  try {
+    if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
+    const { rows } = await query(
+      `SELECT h.*, c.full_name AS customer_name, c.phone AS customer_phone
+       FROM hataali_orders h
+       JOIN users c ON c.id = h.customer_id
+       WHERE h.driver_id = $1
+       ORDER BY h.created_at DESC`,
+      [req.userId]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /hataali/my-deliveries error:', err);
+    res.status(500).json({ error: 'تعذر تحميل طلباتك' });
+  }
+});
+
 // ─── Driver ───────────────────────────────────────────────────────────────────
 
 // GET /api/hataali/available — الطلبات المتاحة للمناديب (وافق عليها الأدمن)
