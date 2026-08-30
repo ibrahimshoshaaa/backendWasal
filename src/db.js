@@ -86,6 +86,17 @@ async function initSchema() {
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION`);
 
+  // ── أوقات العمل والإغلاق التلقائي ──────────────────────────────────────────
+  // working_hours: {"sun":{"open":"10:00","close":"23:00"}, "mon": null (يوم إجازة), ...}
+  // closed_dates: ["2026-01-25", ...] إجازات/مناسبات بتاريخ محدد
+  // break_start/break_end: فترة راحة يومية "HH:mm" (اختياري)
+  // temp_closed_until: إغلاق مؤقت (مثلاً عند ضغط الطلبات) لحد وقت معين
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS working_hours JSONB`);
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS closed_dates JSONB`);
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS break_start TEXT`);
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS break_end TEXT`);
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS temp_closed_until TIMESTAMPTZ`);
+
   await query(`
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
@@ -103,6 +114,32 @@ async function initSchema() {
 
   // ── عمود public_id لصور المنتجات ─────────────────────────────────────────────
   await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS image_public_id TEXT`);
+
+  // ── إدارة الإضافات والاختيارات (مجموعات خيارات لكل منتج) ───────────────────
+  // مثال: "أحجام المشروبات" (اختيار إجباري، واحد بس) أو "الإضافات المدفوعة"
+  // (اختيارية، ممكن أكتر من واحدة). min_select/max_select بيتحكموا في القيود دي.
+  await query(`
+    CREATE TABLE IF NOT EXISTS option_groups (
+      id SERIAL PRIMARY KEY,
+      product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      is_required BOOLEAN NOT NULL DEFAULT false,
+      min_select INT NOT NULL DEFAULT 0,
+      max_select INT NOT NULL DEFAULT 1,
+      sort_order INT NOT NULL DEFAULT 0
+    );
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS option_choices (
+      id SERIAL PRIMARY KEY,
+      group_id INT NOT NULL REFERENCES option_groups(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      extra_price NUMERIC(10,2) NOT NULL DEFAULT 0,
+      is_available BOOLEAN NOT NULL DEFAULT true,
+      sort_order INT NOT NULL DEFAULT 0
+    );
+  `);
 
   await query(`
     CREATE TABLE IF NOT EXISTS addresses (
@@ -126,6 +163,16 @@ async function initSchema() {
       UNIQUE(user_id, product_id)
     );
   `);
+
+  // ── دعم الإضافات المختارة داخل السلة ─────────────────────────────────────────
+  // منتج واحد ممكن يتضاف للسلة أكتر من مرة بإضافات مختلفة (مثلاً بيتزا وسط
+  // وبيتزا كبيرة)، فبنستخدم options_hash عشان نميّز بين الأسطر بدل الاعتماد
+  // على product_id لوحده. الـ UNIQUE القديم(user_id, product_id) بيتم استبداله.
+  await query(`ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS selected_options JSONB`);
+  await query(`ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS options_hash TEXT NOT NULL DEFAULT ''`);
+  await query(`ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS unit_extra NUMERIC(10,2) NOT NULL DEFAULT 0`);
+  await query(`ALTER TABLE cart_items DROP CONSTRAINT IF EXISTS cart_items_user_id_product_id_key`);
+  await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cart_unique_line ON cart_items(user_id, product_id, options_hash)`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS orders (
@@ -164,6 +211,10 @@ async function initSchema() {
   await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS rating INT`);
   await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS rating_comment TEXT`);
 
+  // ── تقييم المندوب — منفصل تماماً عن تقييم المتجر (rating) ────────────────────
+  await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_rating INT`);
+  await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_rating_comment TEXT`);
+
   // Generate order_number for old rows that don't have one
   await query(`
     UPDATE orders SET order_number = 'WS-' || LPAD(id::TEXT, 5, '0')
@@ -193,6 +244,63 @@ async function initSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
+
+  // ── سجل تسجيل الأجهزة (append-only) ─────────────────────────────────────────
+  // device_tokens بيحتفظ بآخر مستخدم للتوكن بس (ON CONFLICT بيستبدل user_id)،
+  // فمش كافي لاكتشاف "نفس الجهاز استخدم حسابات متعددة". السجل ده بيحتفظ
+  // بتاريخ كل ربط (user_id, device_token) من غير ما يتمسح.
+  await query(`
+    CREATE TABLE IF NOT EXISTS device_registrations (
+      id SERIAL PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      device_token TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_device_reg_token ON device_registrations(device_token)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_device_reg_user ON device_registrations(user_id)`);
+
+  // ── نظام مكافحة الطلبات الوهمية — تنبيهات مخزّنة يراجعها الأدمن ─────────────
+  await query(`
+    CREATE TABLE IF NOT EXISTS fraud_flags (
+      id SERIAL PRIMARY KEY,
+      entity_type TEXT NOT NULL,
+      entity_id INT NOT NULL,
+      flag_type TEXT NOT NULL,
+      severity TEXT NOT NULL DEFAULT 'medium',
+      details JSONB,
+      order_id INT REFERENCES orders(id) ON DELETE SET NULL,
+      resolved BOOLEAN NOT NULL DEFAULT false,
+      resolved_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_fraud_entity ON fraud_flags(entity_type, entity_id)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_fraud_resolved ON fraud_flags(resolved)`);
+
+  // ── نظام الإعلانات داخل التطبيق ──────────────────────────────────────────────
+  // link_type: 'none' (بانر بدون رابط) | 'merchant' | 'category' | 'external'
+  // link_target_id بيستخدم مع merchant/category، وlink_url بيستخدم مع external.
+  // region: null = كل المناطق، أو نص المنطقة المستهدفة (زي اسم المدينة/الحي).
+  await query(`
+    CREATE TABLE IF NOT EXISTS ads (
+      id SERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      image_url TEXT NOT NULL,
+      link_type TEXT NOT NULL DEFAULT 'none',
+      link_target_id INT,
+      link_url TEXT,
+      region TEXT,
+      start_at TIMESTAMPTZ,
+      end_at TIMESTAMPTZ,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      sort_order INT NOT NULL DEFAULT 0,
+      views INT NOT NULL DEFAULT 0,
+      clicks INT NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_ads_active ON ads(is_active)`);
 
   await seed();
 }

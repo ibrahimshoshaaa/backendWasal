@@ -90,6 +90,38 @@ router.get('/stats', requireAuth, requireRole('driver'), async (req, res) => {
   }
 });
 
+// ─── تقييم المندوب — ظاهر للمندوب نفسه عشان يعرف مستوى تعامله مع العملاء ────
+router.get('/rating', requireAuth, requireRole('driver'), async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT COALESCE(AVG(driver_rating), 0) AS avg_rating, COUNT(driver_rating) AS rating_count
+       FROM orders WHERE driver_id=$1 AND driver_rating IS NOT NULL`,
+      [req.userId]
+    );
+    res.json({
+      avg_rating: Number(rows[0].avg_rating),
+      rating_count: Number(rows[0].rating_count),
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحميل التقييم' });
+  }
+});
+
+// آخر التقييمات مع تعليقات العملاء — يساعد المندوب يعرف نقاط القوة/الضعف
+router.get('/ratings', requireAuth, requireRole('driver'), async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT id, order_number, driver_rating, driver_rating_comment, delivered_at
+       FROM orders WHERE driver_id=$1 AND driver_rating IS NOT NULL
+       ORDER BY delivered_at DESC LIMIT 50`,
+      [req.userId]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحميل التقييمات' });
+  }
+});
+
 router.get('/profile', requireAuth, requireRole('driver'), async (req, res) => {
   try {
     const { rows } = await query(

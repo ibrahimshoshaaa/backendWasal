@@ -20,6 +20,7 @@ const uploadRoutes = require('./routes/upload');
 const usersRoutes = require('./routes/users');
 const notificationsRoutes = require('./routes/notifications');
 const deviceTokensRoutes = require('./routes/deviceTokens');
+const adsRoutes = require('./routes/ads');
 
 const app = express();
 app.use(cors());
@@ -47,6 +48,7 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/devices', deviceTokensRoutes);
+app.use('/api/ads', adsRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err);

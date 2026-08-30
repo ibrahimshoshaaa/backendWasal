@@ -22,6 +22,20 @@ router.post('/token', requireAuth, async (req, res) => {
          SET user_id = EXCLUDED.user_id, platform = EXCLUDED.platform`,
       [req.userId, token, platform || 'android']
     );
+
+    // سجل تاريخي (append-only) — عشان نظام مكافحة الطلبات الوهمية يقدر يكتشف
+    // نفس الجهاز بيستخدم حسابات متعددة، حتى بعد ما device_tokens يستبدل المالك.
+    const { rows: already } = await query(
+      'SELECT 1 FROM device_registrations WHERE user_id=$1 AND device_token=$2 LIMIT 1',
+      [req.userId, token]
+    );
+    if (!already.length) {
+      await query('INSERT INTO device_registrations (user_id, device_token) VALUES ($1,$2)', [
+        req.userId,
+        token,
+      ]);
+    }
+
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
