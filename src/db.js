@@ -295,11 +295,14 @@ async function initSchema() {
       end_at TIMESTAMPTZ,
       is_active BOOLEAN NOT NULL DEFAULT true,
       sort_order INT NOT NULL DEFAULT 0,
+      slide_duration INT NOT NULL DEFAULT 5,
       views INT NOT NULL DEFAULT 0,
       clicks INT NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
+  // Migration: add slide_duration if not exists (for existing DBs)
+  await query(`ALTER TABLE ads ADD COLUMN IF NOT EXISTS slide_duration INT NOT NULL DEFAULT 5`);
   await query(`CREATE INDEX IF NOT EXISTS idx_ads_active ON ads(is_active)`);
 
   await seed();
