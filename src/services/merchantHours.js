@@ -54,7 +54,15 @@ function isMerchantOpenNow(merchant, now = new Date()) {
   if (hours && typeof hours === 'object') {
     const today = hours[dayKey];
     if (!today) return { open: false, reason: 'day_off' };
-    if (time < today.open || time > today.close) {
+
+    // لو معاد القفل أصغر من معاد الفتح، يبقى المتجر شغال لحد بعد نص الليل
+    // (مثال: يفتح 10:00 ويقفل 02:00 اليوم اللي بعده)
+    const overnight = today.close < today.open;
+    const withinHours = overnight
+      ? (time >= today.open || time <= today.close)
+      : (time >= today.open && time <= today.close);
+
+    if (!withinHours) {
       return { open: false, reason: 'outside_hours' };
     }
   }
