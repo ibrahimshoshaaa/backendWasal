@@ -212,7 +212,8 @@ router.put('/profile', requireAuth, requireRole('merchant'), async (req, res) =>
 
     const fields = ['name', 'image_url', 'cover_image_url', 'address', 'phone', 'tags',
                     'is_open', 'hours_note', 'delivery_fee', 'delivery_time_minutes', 'min_order',
-                    'lat', 'lng', 'working_hours', 'closed_dates', 'break_start', 'break_end'];
+                    'lat', 'lng', 'working_hours', 'closed_dates', 'break_start', 'break_end',
+                    'category_id'];
     const jsonFields = new Set(['tags', 'working_hours', 'closed_dates']);
     const updates = [];
     const params = [];
