@@ -99,6 +99,8 @@ async function initSchema() {
 
   // ── تثبيت متجر في أول قائمة "أحدث المتاجر المنضمة" من لوحة تحكم الأدمن ──────
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT false`);
+  // ربط مناديب بمتجر: مصفوفة IDs — لو مش فاضية، طلبات المتجر تروح لهم بس
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS linked_driver_ids JSONB NOT NULL DEFAULT '[]'`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS products (
@@ -393,10 +395,27 @@ async function createNotification(userId, { title, body, type, orderId }) {
 
 // Helper: إشعار كل المناديب المتصلين (is_online=true) بوجود طلب جديد متاح
 // للاستلام — سواء طلب متجر (orders) أو طلب هاتهالي (hataali_orders).
-async function notifyOnlineDrivers({ title, body, type, orderId }, sendToUser) {
+async function notifyOnlineDrivers({ title, body, type, orderId, merchantId }, sendToUser) {
   try {
+    let linkedFilter = '';
+    const params = [];
+    // لو الطلب من متجر مربوط بمناديب معيّنة، الإشعار يروح لهم بس
+    if (merchantId) {
+      const { rows: mRows } = await query(
+        `SELECT linked_driver_ids FROM merchants WHERE id=$1`, [merchantId]
+      );
+      const linked = (mRows[0] && Array.isArray(mRows[0].linked_driver_ids)) ? mRows[0].linked_driver_ids : [];
+      if (linked.length) {
+        params.push(JSON.stringify(linked.map(Number)));
+        linkedFilter = ` AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements_text(
+            (SELECT linked_driver_ids FROM merchants WHERE id=${merchantId})
+          ) AS t(did) WHERE t.did::int = users.id
+        )`;
+      }
+    }
     const { rows } = await query(
-      `SELECT id FROM users WHERE role='driver' AND is_online=true`
+      `SELECT id FROM users WHERE role='driver' AND is_online=true${linkedFilter}`, params
     );
     for (const d of rows) {
       createNotification(d.id, { title, body, type, orderId }).catch(() => {});

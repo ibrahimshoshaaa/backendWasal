@@ -182,6 +182,7 @@ router.put('/orders/:id/ready', requireAuth, requireRole('merchant'), async (req
         body: `طلب رقم ${order.order_number} جاهز وفي انتظار مندوب يستلمه`,
         type: 'new_available_order',
         orderId: order.id,
+        merchantId: merchantId,
       },
       req.app.locals.sendToUser
     ).catch(() => {});

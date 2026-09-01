@@ -26,8 +26,15 @@ router.get('/orders', requireAuth, requireRole('driver'), async (req, res) => {
        LEFT JOIN merchants m ON m.id = o.merchant_id
        LEFT JOIN users u ON u.id = o.customer_id
        LEFT JOIN addresses a ON a.id = o.address_id
-       WHERE (o.status='ready' AND o.driver_id IS NULL)
+       WHERE (
+           -- طلبات جاهزة بدون مندوب: تظهر للمندوب لو المتجر مش مربوط، أو هو واحد من المناديب المربوطين بيه
+           (o.status='ready' AND o.driver_id IS NULL AND (
+             m.linked_driver_ids IS NULL OR m.linked_driver_ids = '[]'::jsonb
+             OR m.linked_driver_ids @> to_jsonb($1::int)
+             OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(m.linked_driver_ids,'[]'::jsonb)) t(d) WHERE t.d::int=$1)
+           ))
           OR (o.driver_id=$1 AND o.status='picked_up')
+       )
        ORDER BY o.created_at DESC`,
       [req.userId]
     );
@@ -235,8 +242,13 @@ router.put('/location', requireAuth, requireRole('driver'), async (req, res) => 
 router.put('/orders/:id/accept', requireAuth, requireRole('driver'), async (req, res) => {
   try {
     const { rowCount, rows } = await query(
-      `UPDATE orders SET status='picked_up', driver_id=$1, picked_up_at=now()
-       WHERE id=$2 AND status='ready' AND driver_id IS NULL RETURNING *`,
+      `UPDATE orders o SET status='picked_up', driver_id=$1, picked_up_at=now()
+       FROM merchants m
+       WHERE o.id=$2 AND o.status='ready' AND o.driver_id IS NULL
+         AND m.id = o.merchant_id
+         AND (m.linked_driver_ids IS NULL OR m.linked_driver_ids = '[]'::jsonb
+              OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(m.linked_driver_ids,'[]'::jsonb)) t(d) WHERE t.d::int=$1))
+       RETURNING o.*`,
       [req.userId, req.params.id]
     );
     if (!rowCount) return res.status(404).json({ error: 'الطلب غير متاح' });

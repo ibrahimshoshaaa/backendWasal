@@ -20,7 +20,13 @@ router.get('/merchants', async (req, res) => {
     `SELECT m.*,
             u.email AS owner_email,
             u.phone AS owner_phone,
-            c.name_ar AS category_name
+            c.name_ar AS category_name,
+            (SELECT jsonb_agg(jsonb_build_object('id', d.id, 'name', d.full_name))
+             FROM users d
+             WHERE d.role='driver' AND EXISTS (
+               SELECT 1 FROM jsonb_array_elements_text(COALESCE(m.linked_driver_ids,'[]'::jsonb)) t(x)
+               WHERE t.x::int = d.id
+             )) AS linked_drivers
      FROM merchants m
      LEFT JOIN users u ON u.id = m.owner_user_id
      LEFT JOIN categories c ON c.id = m.category_id
@@ -462,6 +468,33 @@ router.delete('/ads/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'فشل حذف الإعلان' });
+  }
+});
+
+// ─── ربط مناديب بمتجر ─────────────────────────────────────────────────────────
+// PUT /api/admin/merchants/:id/linked-drivers  body: { driver_ids: [1,2,3] }
+// مصفوفة فاضية = المتجر غير مربوط (أي مندوب متاح يقدر يستلم طلباته)
+router.put('/merchants/:id/linked-drivers', async (req, res) => {
+  try {
+    const ids = req.body.driver_ids;
+    if (!Array.isArray(ids)) return res.status(400).json({ error: 'driver_ids لازم تكون مصفوفة' });
+    const clean = ids.map(Number).filter(n => Number.isInteger(n) && n > 0);
+    // تأكد إن كل الـ IDs دي مناديب فعلاً
+    if (clean.length) {
+      const { rows: chk } = await query(
+        `SELECT COUNT(*)::int AS c FROM users WHERE role='driver' AND id = ANY($1::int[])`, [clean]
+      );
+      if (chk[0].c !== clean.length) return res.status(400).json({ error: 'فيه ID مش لمندوب موجود' });
+    }
+    const { rows } = await query(
+      `UPDATE merchants SET linked_driver_ids=$1 WHERE id=$2 RETURNING id, name, linked_driver_ids`,
+      [JSON.stringify(clean), req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'المتجر غير موجود' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('PUT /admin/merchants/:id/linked-drivers error:', err);
+    res.status(500).json({ error: 'فشل حفظ ربط المناديب' });
   }
 });
 
