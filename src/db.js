@@ -97,6 +97,9 @@ async function initSchema() {
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS break_end TEXT`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS temp_closed_until TIMESTAMPTZ`);
 
+  // ── تثبيت متجر في أول قائمة "أحدث المتاجر المنضمة" من لوحة تحكم الأدمن ──────
+  await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT false`);
+
   await query(`
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
@@ -140,6 +143,9 @@ async function initSchema() {
       sort_order INT NOT NULL DEFAULT 0
     );
   `);
+
+  // صورة اختيارية لكل اختيار (مثلاً صورة توضح "حجم كبير" أو "طبق إضافي")
+  await query(`ALTER TABLE option_choices ADD COLUMN IF NOT EXISTS image_url TEXT`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS addresses (
@@ -385,7 +391,23 @@ async function createNotification(userId, { title, body, type, orderId }) {
   }
 }
 
-module.exports = { pool, query, initSchema, createNotification };
+// Helper: إشعار كل المناديب المتصلين (is_online=true) بوجود طلب جديد متاح
+// للاستلام — سواء طلب متجر (orders) أو طلب هاتهالي (hataali_orders).
+async function notifyOnlineDrivers({ title, body, type, orderId }, sendToUser) {
+  try {
+    const { rows } = await query(
+      `SELECT id FROM users WHERE role='driver' AND is_online=true`
+    );
+    for (const d of rows) {
+      createNotification(d.id, { title, body, type, orderId }).catch(() => {});
+      sendToUser?.(d.id, { type: 'notification', title, body, notifType: type, orderId });
+    }
+  } catch (e) {
+    console.error('[notifyOnlineDrivers] failed:', e.message);
+  }
+}
+
+module.exports = { pool, query, initSchema, createNotification, notifyOnlineDrivers };
 
 // ─── App settings (hataali fee, etc.) ─────────────────────────────────────────
 // يتم استدعاؤه داخل initSchema

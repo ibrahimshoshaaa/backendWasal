@@ -1,5 +1,5 @@
 const express = require('express');
-const { query, createNotification } = require('../db');
+const { query, createNotification, notifyOnlineDrivers } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { destroyByPublicId, extractPublicIdFromUrl } = require('../config/cloudinary');
 const { checkCancelRate } = require('../services/fraud');
@@ -174,6 +174,18 @@ router.put('/orders/:id/ready', requireAuth, requireRole('merchant'), async (req
       type: 'order_ready',
       orderId: order.id,
     });
+
+    // إشعار كل المناديب المتصلين بوجود طلب جديد متاح للاستلام
+    notifyOnlineDrivers(
+      {
+        title: 'طلب جديد متاح! 📦',
+        body: `طلب رقم ${order.order_number} جاهز وفي انتظار مندوب يستلمه`,
+        type: 'new_available_order',
+        orderId: order.id,
+      },
+      req.app.locals.sendToUser
+    ).catch(() => {});
+
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'فشل تحديث حالة الطلب' });
@@ -210,8 +222,11 @@ router.put('/profile', requireAuth, requireRole('merchant'), async (req, res) =>
       oldRow = oldRows[0] || null;
     }
 
+    // ملحوظة: 'delivery_fee' اتشال عمداً من هنا — رسوم التوصيل بتتحدد من
+    // لوحة تحكم الأدمن فقط ومش من صفحة التاجر (حتى لو حد بعت الحقل يدوياً
+    // في الـ request، الباك إند بيتجاهله تماماً).
     const fields = ['name', 'image_url', 'cover_image_url', 'address', 'phone', 'tags',
-                    'is_open', 'hours_note', 'delivery_fee', 'delivery_time_minutes', 'min_order',
+                    'is_open', 'hours_note', 'delivery_time_minutes', 'min_order',
                     'lat', 'lng', 'working_hours', 'closed_dates', 'break_start', 'break_end',
                     'category_id'];
     const jsonFields = new Set(['tags', 'working_hours', 'closed_dates']);
@@ -523,12 +538,12 @@ router.post(
       );
       if (!check.length) return res.status(404).json({ error: 'المجموعة غير موجودة' });
 
-      const { name, extra_price, sort_order } = req.body || {};
+      const { name, extra_price, sort_order, image_url } = req.body || {};
       if (!name) return res.status(400).json({ error: 'اسم الاختيار مطلوب' });
       const { rows } = await query(
-        `INSERT INTO option_choices (group_id, name, extra_price, sort_order)
-         VALUES ($1,$2,$3,$4) RETURNING *`,
-        [req.params.groupId, name, extra_price || 0, sort_order || 0]
+        `INSERT INTO option_choices (group_id, name, extra_price, sort_order, image_url)
+         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [req.params.groupId, name, extra_price || 0, sort_order || 0, image_url || null]
       );
       res.json(rows[0]);
     } catch (err) {
@@ -550,7 +565,7 @@ router.put('/option-choices/:choiceId', requireAuth, requireRole('merchant'), as
     );
     if (!check.length) return res.status(404).json({ error: 'الاختيار غير موجود' });
 
-    const fields = ['name', 'extra_price', 'is_available', 'sort_order'];
+    const fields = ['name', 'extra_price', 'is_available', 'sort_order', 'image_url'];
     const updates = [];
     const params = [];
     for (const f of fields) {

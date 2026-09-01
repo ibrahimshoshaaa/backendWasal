@@ -19,7 +19,8 @@ router.get('/', async (req, res) => {
       params.push(category_id);
       sql += ` AND m.category_id=$${params.length}`;
     }
-    sql += ' ORDER BY m.id DESC';
+    // المتاجر المثبّتة من الأدمن تظهر أولاً دائماً، وبعدها الأحدث انضماماً.
+    sql += ' ORDER BY m.is_pinned DESC, m.id DESC';
     const { rows } = await query(sql, params);
     const withStatus = rows.map((m) => ({ ...m, is_open_now: isMerchantOpenNow(m).open }));
     res.json(withStatus);
@@ -90,7 +91,7 @@ router.put('/:id', requireAuth, requireRole('admin'), async (req, res) => {
     const fields = ['name', 'category_id', 'image_url', 'cover_image_url', 'address', 'phone',
                     'status', 'tags', 'is_open', 'hours_note', 'delivery_fee',
                     'delivery_time_minutes', 'min_order', 'lat', 'lng',
-                    'working_hours', 'closed_dates', 'break_start', 'break_end'];
+                    'working_hours', 'closed_dates', 'break_start', 'break_end', 'is_pinned'];
     const jsonFields = new Set(['tags', 'working_hours', 'closed_dates']);
     const updates = [];
     const params = [];

@@ -37,30 +37,53 @@ router.get('/orders', requireAuth, requireRole('driver'), async (req, res) => {
   }
 });
 
+// سجل التوصيل — بيجمع طلبات المتاجر (orders) وطلبات هاتهالي (hataali_orders)
+// اللي المندوب سلّمها، عشان النوعين يظهروا مع بعض بترتيب واحد حسب وقت التسليم.
 router.get('/orders/history', requireAuth, requireRole('driver'), async (req, res) => {
   try {
     const { rows } = await query(
-      `SELECT o.*,
-              m.name AS merchant_name,
-              m.address AS merchant_address,
-              m.lat AS merchant_lat,
-              m.lng AS merchant_lng,
-              u.full_name AS customer_name,
-              u.phone AS customer_phone,
-              a.address_text AS delivery_address,
-              a.lat AS delivery_lat,
-              a.lng AS delivery_lng
-       FROM orders o
-       LEFT JOIN merchants m ON m.id = o.merchant_id
-       LEFT JOIN users u ON u.id = o.customer_id
-       LEFT JOIN addresses a ON a.id = o.address_id
-       WHERE o.driver_id=$1 AND o.status='delivered'
-       ORDER BY o.delivered_at DESC
+      `SELECT * FROM (
+         SELECT o.id, o.order_number, o.status, o.delivery_fee, o.delivered_at,
+                m.name AS merchant_name,
+                m.address AS merchant_address,
+                m.lat AS merchant_lat,
+                m.lng AS merchant_lng,
+                u.full_name AS customer_name,
+                u.phone AS customer_phone,
+                a.address_text AS delivery_address,
+                a.lat AS delivery_lat,
+                a.lng AS delivery_lng,
+                'store' AS order_type
+         FROM orders o
+         LEFT JOIN merchants m ON m.id = o.merchant_id
+         LEFT JOIN users u ON u.id = o.customer_id
+         LEFT JOIN addresses a ON a.id = o.address_id
+         WHERE o.driver_id=$1 AND o.status='delivered'
+
+         UNION ALL
+
+         SELECT h.id, ('HT-' || h.id::text) AS order_number, h.status, h.delivery_fee, h.updated_at AS delivered_at,
+                h.title AS merchant_name,
+                h.source AS merchant_address,
+                NULL::double precision AS merchant_lat,
+                NULL::double precision AS merchant_lng,
+                c.full_name AS customer_name,
+                c.phone AS customer_phone,
+                h.delivery_address AS delivery_address,
+                h.lat AS delivery_lat,
+                h.lng AS delivery_lng,
+                'hataali' AS order_type
+         FROM hataali_orders h
+         LEFT JOIN users c ON c.id = h.customer_id
+         WHERE h.driver_id=$1 AND h.status='delivered'
+       ) combined
+       ORDER BY delivered_at DESC
        LIMIT 100`,
       [req.userId]
     );
     res.json(rows);
   } catch (err) {
+    console.error('GET /driver/orders/history error:', err);
     res.status(500).json({ error: 'فشل تحميل سجل التوصيل' });
   }
 });
