@@ -24,6 +24,9 @@ const adsRoutes = require('./routes/ads');
 const hataaliRoutes = require('./routes/hataali');
 
 const app = express();
+// Railway بيحط السيرفر ورا proxy، فلازم trust proxy عشان express-rate-limit
+// (وأي حاجة تانية بتعتمد على req.ip) تقرأ الـ IP الحقيقي بتاع المستخدم مش IP الـ proxy.
+app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json());
 

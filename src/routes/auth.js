@@ -7,12 +7,32 @@
 
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const rateLimit = require('express-rate-limit');
 const { query } = require('../db');
 const { signToken } = require('../middleware/auth');
 const { upload, multerErrorHandler } = require('../middleware/uploader');
 const { uploadBuffer } = require('../config/cloudinary');
 
 const router = express.Router();
+
+// ─── Rate limiting — يمنع محاولات brute-force على الدخول وspam التسجيل ────────
+// بيحسب المحاولات لكل IP. لازم `app.set('trust proxy', 1)` يكون متحطوط في
+// server.js عشان يقرأ الـ IP الحقيقي للمستخدم (Railway بيحط السيرفر ورا proxy).
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 دقيقة
+  max: 10,                   // 10 محاولات بس لكل IP في الـ 15 دقيقة
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'محاولات دخول كتير، حاول تاني بعد شوية' },
+});
+
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // ساعة
+  max: 20,                   // 20 تسجيل حساب جديد بالساعة لكل IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'محاولات تسجيل كتير، حاول تاني بعد شوية' },
+});
 
 // نفس الحقول القديمة بالظبط.
 const registerUpload = upload.fields([
@@ -41,7 +61,7 @@ async function uploadOrNull(file, folder) {
   return { url: r.url, public_id: r.public_id };
 }
 
-router.post('/register', registerUpload, async (req, res) => {
+router.post('/register', registerLimiter, registerUpload, async (req, res) => {
   const { full_name, email, password, phone, role } = req.body || {};
   if (!full_name || !email || !password) {
     return res.status(400).json({ error: 'الاسم والإيميل وكلمة المرور مطلوبين' });
@@ -138,7 +158,7 @@ router.post('/register', registerUpload, async (req, res) => {
   }
 });
 
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: 'الإيميل وكلمة المرور مطلوبين' });
 
