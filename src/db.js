@@ -335,6 +335,31 @@ async function initSchema() {
   await query(`ALTER TABLE hataali_orders ADD COLUMN IF NOT EXISTS driver_id INT REFERENCES users(id)`);
   await query(`ALTER TABLE hataali_orders ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION`);
   await query(`ALTER TABLE hataali_orders ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION`);
+  // ── جدول خدمة وصّلني / وصّل لي ─────────────────────────────────────────────
+  await query(`
+    CREATE TABLE IF NOT EXISTS trips (
+      id               SERIAL PRIMARY KEY,
+      customer_id      INT NOT NULL REFERENCES users(id),
+      driver_id        INT REFERENCES users(id),
+      type             TEXT NOT NULL CHECK (type IN ('wassalni','wassal_li')),
+      pickup_address   TEXT NOT NULL,
+      pickup_lat       DOUBLE PRECISION,
+      pickup_lng       DOUBLE PRECISION,
+      dropoff_address  TEXT NOT NULL,
+      dropoff_lat      DOUBLE PRECISION,
+      dropoff_lng      DOUBLE PRECISION,
+      notes            TEXT,
+      price            NUMERIC(10,2) NOT NULL DEFAULT 0,
+      status           TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending','accepted','picked_up','delivered','cancelled')),
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_trips_customer ON trips(customer_id)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_trips_driver  ON trips(driver_id)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_trips_status  ON trips(status)`);
+
   await ensureSettings();
   await seed();
 }
@@ -439,7 +464,8 @@ async function ensureSettings() {
   `);
   // Default hataali delivery fee = 35
   await query(`
-    INSERT INTO app_settings (key, value) VALUES ('hataali_fee', '35')
+    INSERT INTO app_settings (key, value) VALUES ('hataali_fee', '35'),
+      ('wassalni_price', '50'), ('wassal_li_price', '40')
     ON CONFLICT (key) DO NOTHING
   `);
 }

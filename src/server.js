@@ -22,6 +22,7 @@ const notificationsRoutes = require('./routes/notifications');
 const deviceTokensRoutes = require('./routes/deviceTokens');
 const adsRoutes = require('./routes/ads');
 const hataaliRoutes = require('./routes/hataali');
+const tripsRoutes   = require('./routes/trips');
 
 const app = express();
 // Railway بيحط السيرفر ورا proxy، فلازم trust proxy عشان express-rate-limit
@@ -54,6 +55,7 @@ app.use('/api/notifications', notificationsRoutes);
 app.use('/api/devices', deviceTokensRoutes);
 app.use('/api/ads', adsRoutes);
 app.use('/api/hataali', requireAuth, hataaliRoutes);
+app.use('/api/trips',   requireAuth, tripsRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err);
