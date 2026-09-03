@@ -233,6 +233,13 @@ router.put('/location', requireAuth, requireRole('driver'), async (req, res) => 
     if (activeHataali.length) {
       sendToUser?.(activeHataali[0].customer_id, { type: 'driver_location', lat, lng });
     }
+    const { rows: activeTrips } = await query(
+      `SELECT customer_id FROM trips WHERE driver_id=$1 AND status='picked_up' LIMIT 1`,
+      [req.userId]
+    );
+    if (activeTrips.length) {
+      sendToUser?.(activeTrips[0].customer_id, { type: 'driver_location', lat, lng });
+    }
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'فشل تحديث الموقع' });

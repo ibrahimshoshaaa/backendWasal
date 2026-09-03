@@ -1,5 +1,5 @@
 const express = require('express');
-const { query } = require('../db');
+const { query, createNotification } = require('../db');
 const router = express.Router();
 
 // ─── helpers ────────────────────────────────────────────────────────────────────
@@ -9,16 +9,17 @@ async function getPrice(type) {
   return parseFloat(rows[0]?.value || '50');
 }
 
-async function notifyAdmins(app, title, body, type) {
+// إشعار via WebSocket (لو المستخدم متصل دلوقتي) + DB + FCM push حقيقي
+// (نفس نمط notify() في orders.js) — ده اللي كان ناقص هنا واستبدلناه بدل
+// الـ INSERT المباشر اللي مكنش بيبعت push فعلي.
+function notify(req, userId, { title, body, type }) {
+  createNotification(userId, { title, body, type }).catch(() => {});
+  req.app.locals.sendToUser?.(userId, { type: 'notification', title, body, notifType: type });
+}
+
+async function notifyAdmins(req, title, body, type) {
   const { rows: admins } = await query(`SELECT id FROM users WHERE role='admin'`);
-  const sendToUser = app.locals.sendToUser;
-  for (const a of admins) {
-    if (sendToUser) sendToUser(a.id, { type: 'notification', message: title });
-    await query(
-      `INSERT INTO notifications (user_id, title, body, type) VALUES ($1,$2,$3,$4)`,
-      [a.id, title, body, type]
-    );
-  }
+  for (const a of admins) notify(req, a.id, { title, body, type });
 }
 
 // ─── Customer ───────────────────────────────────────────────────────────────────
@@ -65,18 +66,23 @@ router.post('/', async (req, res) => {
 
     const label = type === 'wassalni' ? 'وصّلني' : 'وصّل لي';
     await notifyAdmins(
-      req.app,
+      req,
       `طلب ${label} جديد`,
       `من: ${pickup_address} — إلى: ${dropoff_address}`,
       'trip'
     );
 
-    // إشعار للسائقين المتاحين
+    // إشعار للسائقين المتاحين (أونلاين فعليًا، زي باقي أنواع الطلبات)
     const { rows: drivers } = await query(
-      `SELECT id FROM users WHERE role='driver' AND driver_status='active'`
+      `SELECT id FROM users WHERE role='driver' AND is_online=true`
     );
     const sendToUser = req.app.locals.sendToUser;
     for (const d of drivers) {
+      notify(req, d.id, {
+        title: `طلب ${label} جديد`,
+        body: `من: ${pickup_address} — إلى: ${dropoff_address}`,
+        type: 'trip',
+      });
       if (sendToUser) sendToUser(d.id, { type: 'new_trip', trip: rows[0] });
     }
 
@@ -189,12 +195,8 @@ router.post('/:id/accept', async (req, res) => {
     if (!rows[0]) return res.status(400).json({ error: 'الطلب غير متاح' });
 
     const trip = rows[0];
-    const sendToUser = req.app.locals.sendToUser;
-    if (sendToUser) sendToUser(trip.customer_id, { type: 'trip_accepted', trip });
-    await query(
-      `INSERT INTO notifications (user_id, title, body, type) VALUES ($1,$2,$3,'trip')`,
-      [trip.customer_id, 'تم قبول طلبك', 'المندوب في الطريق إليك']
-    );
+    req.app.locals.sendToUser?.(trip.customer_id, { type: 'trip_accepted', trip });
+    notify(req, trip.customer_id, { title: 'تم قبول طلبك', body: 'المندوب في الطريق إليك', type: 'trip' });
     res.json(trip);
   } catch (err) {
     console.error(err);
@@ -212,8 +214,12 @@ router.post('/:id/pickup', async (req, res) => {
     );
     if (!rows[0]) return res.status(400).json({ error: 'لا يمكن تحديث الحالة' });
 
-    const sendToUser = req.app.locals.sendToUser;
-    if (sendToUser) sendToUser(rows[0].customer_id, { type: 'trip_picked_up', trip: rows[0] });
+    req.app.locals.sendToUser?.(rows[0].customer_id, { type: 'trip_picked_up', trip: rows[0] });
+    notify(req, rows[0].customer_id, {
+      title: 'المندوب في الطريق',
+      body: 'المندوب وصل لنقطة الانطلاق وبدأ الرحلة',
+      type: 'trip',
+    });
     res.json(rows[0]);
   } catch (err) {
     console.error(err);
@@ -231,12 +237,8 @@ router.post('/:id/deliver', async (req, res) => {
     );
     if (!rows[0]) return res.status(400).json({ error: 'لا يمكن إتمام الطلب' });
 
-    const sendToUser = req.app.locals.sendToUser;
-    if (sendToUser) sendToUser(rows[0].customer_id, { type: 'trip_delivered', trip: rows[0] });
-    await query(
-      `INSERT INTO notifications (user_id, title, body, type) VALUES ($1,$2,$3,'trip')`,
-      [rows[0].customer_id, 'تم التوصيل', 'وصل طلبك بنجاح']
-    );
+    req.app.locals.sendToUser?.(rows[0].customer_id, { type: 'trip_delivered', trip: rows[0] });
+    notify(req, rows[0].customer_id, { title: 'تم التوصيل', body: 'وصل طلبك بنجاح', type: 'trip' });
     res.json(rows[0]);
   } catch (err) {
     console.error(err);
