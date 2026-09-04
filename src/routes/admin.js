@@ -162,9 +162,13 @@ router.get('/drivers', async (req, res) => {
 // Admin creates a driver account directly — active immediately, no KYC
 // documents required since the admin is vouching for them.
 router.post('/drivers', async (req, res) => {
-  const { full_name, email, password, phone, vehicle_type, national_id } = req.body || {};
+  const { full_name, email, password, phone, vehicle_type, national_id, gender } = req.body || {};
   if (!full_name || !email || !password) {
     return res.status(400).json({ error: 'الاسم والإيميل وكلمة المرور مطلوبين' });
+  }
+  const finalGender = ['male', 'female'].includes(gender) ? gender : null;
+  if (!finalGender) {
+    return res.status(400).json({ error: 'الرجاء تحديد النوع (ذكر أو أنثى)' });
   }
 
   try {
@@ -173,9 +177,9 @@ router.post('/drivers', async (req, res) => {
 
     const hash = await bcrypt.hash(password, 10);
     const { rows } = await query(
-      `INSERT INTO users (full_name, email, password_hash, phone, role, vehicle_type, national_id, driver_status)
-       VALUES ($1,$2,$3,$4,'driver',$5,$6,'active') RETURNING *`,
-      [full_name, email, hash, phone || null, vehicle_type || null, national_id || null]
+      `INSERT INTO users (full_name, email, password_hash, phone, role, vehicle_type, national_id, driver_status, gender)
+       VALUES ($1,$2,$3,$4,'driver',$5,$6,'active',$7) RETURNING *`,
+      [full_name, email, hash, phone || null, vehicle_type || null, national_id || null, finalGender]
     );
     const { password_hash, ...safe } = rows[0];
     res.json(safe);

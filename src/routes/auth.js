@@ -50,6 +50,7 @@ function publicUser(row) {
     phone: row.phone,
     role: row.role,
     avatar_url: row.avatar_url,
+    gender: row.gender || null,
   };
 }
 
@@ -62,12 +63,17 @@ async function uploadOrNull(file, folder) {
 }
 
 router.post('/register', registerLimiter, registerUpload, async (req, res) => {
-  const { full_name, email, password, phone, role } = req.body || {};
+  const { full_name, email, password, phone, role, gender } = req.body || {};
   if (!full_name || !email || !password) {
     return res.status(400).json({ error: 'الاسم والإيميل وكلمة المرور مطلوبين' });
   }
   const allowedRoles = ['customer', 'merchant', 'driver'];
   const finalRole = allowedRoles.includes(role) ? role : 'customer';
+  const finalGender = ['male', 'female'].includes(gender) ? gender : null;
+  // العميل والمندوب لازم يحددوا النوع (عشان فيتشر اختيار جنس السائق في وصّلني/وصّل لي)
+  if ((finalRole === 'customer' || finalRole === 'driver') && !finalGender) {
+    return res.status(400).json({ error: 'الرجاء تحديد النوع (ذكر أو أنثى)' });
+  }
 
   const files = req.files || {};
   const logoFile = files.logo?.[0] || null;
@@ -101,19 +107,20 @@ router.post('/register', registerLimiter, registerUpload, async (req, res) => {
     const hash = await bcrypt.hash(password, 10);
     const { rows } = await query(
       `INSERT INTO users (
-         full_name, email, password_hash, phone, role,
+         full_name, email, password_hash, phone, role, gender,
          national_id, vehicle_type,
          id_front_url, id_front_public_id,
          id_back_url, id_back_public_id,
          selfie_url, selfie_public_id
        )
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
       [
         full_name,
         email,
         hash,
         phone || null,
         finalRole,
+        finalGender,
         req.body.national_id || null,
         req.body.vehicle_type || null,
         idFrontUp?.url || null,

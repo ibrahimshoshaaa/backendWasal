@@ -35,6 +35,8 @@ async function initSchema() {
   // ── أعمدة public_id لصور المستخدمين — Migration آمنة (IF NOT EXISTS) ─────────
   // بنحفظ public_id جنب كل رابط عشان نقدر نحذف الصورة القديمة من Cloudinary
   // لما المستخدم يستبدلها. الأعمدة اختيارية (nullable) ومش بتكسر أي endpoint قديم.
+  // ── جنس المستخدم (ذكر/أنثى) — للعميل عشان يختار جنس المندوب، وللمندوب عشان يظهر في الرحلات المناسبة له
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS gender TEXT CHECK (gender IN ('male','female') OR gender IS NULL)`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_public_id TEXT`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS id_front_public_id TEXT`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS id_back_public_id TEXT`);
@@ -352,10 +354,13 @@ async function initSchema() {
       price            NUMERIC(10,2) NOT NULL DEFAULT 0,
       status           TEXT NOT NULL DEFAULT 'pending'
                        CHECK (status IN ('pending','accepted','picked_up','delivered','cancelled')),
+      preferred_gender TEXT CHECK (preferred_gender IN ('male','female') OR preferred_gender IS NULL),
       created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `);
+  // Migration آمنة لو الجدول كان موجود من قبل من غير العمود ده
+  await query(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS preferred_gender TEXT CHECK (preferred_gender IN ('male','female') OR preferred_gender IS NULL)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_trips_customer ON trips(customer_id)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_trips_driver  ON trips(driver_id)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_trips_status  ON trips(status)`);

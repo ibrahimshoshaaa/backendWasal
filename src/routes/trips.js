@@ -44,42 +44,47 @@ router.post('/', async (req, res) => {
   try {
     const {
       type, pickup_address, pickup_lat, pickup_lng,
-      dropoff_address, dropoff_lat, dropoff_lng, notes,
+      dropoff_address, dropoff_lat, dropoff_lng, notes, preferred_gender,
     } = req.body || {};
 
     if (!type || !['wassalni', 'wassal_li'].includes(type))
       return res.status(400).json({ error: 'نوع الخدمة غير صحيح' });
     if (!pickup_address || !dropoff_address)
       return res.status(400).json({ error: 'عنوان الانطلاق والوجهة مطلوبان' });
+    const finalGender = ['male', 'female'].includes(preferred_gender) ? preferred_gender : null;
 
     const price = await getPrice(type);
 
     const { rows } = await query(
       `INSERT INTO trips
          (customer_id, type, pickup_address, pickup_lat, pickup_lng,
-          dropoff_address, dropoff_lat, dropoff_lng, notes, price)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+          dropoff_address, dropoff_lat, dropoff_lng, notes, price, preferred_gender)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
       [req.userId, type, pickup_address, pickup_lat || null, pickup_lng || null,
        dropoff_address, dropoff_lat || null, dropoff_lng || null,
-       notes || null, price]
+       notes || null, price, finalGender]
     );
 
     const label = type === 'wassalni' ? 'وصّلني' : 'وصّل لي';
+    const genderNote = finalGender ? (finalGender === 'male' ? ' (سائق)' : ' (سائقة)') : '';
     await notifyAdmins(
       req,
-      `طلب ${label} جديد`,
+      `طلب ${label} جديد${genderNote}`,
       `من: ${pickup_address} — إلى: ${dropoff_address}`,
       'trip'
     );
 
-    // إشعار للسائقين المتاحين (أونلاين فعليًا، زي باقي أنواع الطلبات)
+    // إشعار للسائقين المتاحين (أونلاين فعليًا) — لو العميل حدد نوع مندوب معين
+    // (ولد/بنت)، الإشعار يروح بس للمناديب من نفس النوع ده.
+    const genderFilter = finalGender ? ` AND gender=$1` : '';
     const { rows: drivers } = await query(
-      `SELECT id FROM users WHERE role='driver' AND is_online=true`
+      `SELECT id FROM users WHERE role='driver' AND is_online=true${genderFilter}`,
+      finalGender ? [finalGender] : []
     );
     const sendToUser = req.app.locals.sendToUser;
     for (const d of drivers) {
       notify(req, d.id, {
-        title: `طلب ${label} جديد`,
+        title: `طلب ${label} جديد${genderNote}`,
         body: `من: ${pickup_address} — إلى: ${dropoff_address}`,
         type: 'trip',
       });
@@ -150,14 +155,19 @@ router.post('/:id/cancel', async (req, res) => {
 // ─── Driver ─────────────────────────────────────────────────────────────────────
 
 // GET /api/trips/driver/available — الطلبات المتاحة للمندوب
+// (بيشوف بس الرحلات اللي preferred_gender فيها فاضي، أو مطابق لنوعه هو)
 router.get('/driver/available', async (req, res) => {
   try {
+    const { rows: meRows } = await query(`SELECT gender FROM users WHERE id=$1`, [req.userId]);
+    const myGender = meRows[0]?.gender || null;
     const { rows } = await query(
       `SELECT t.*, c.full_name AS customer_name, c.phone AS customer_phone
        FROM trips t
        JOIN users c ON c.id = t.customer_id
        WHERE t.status='pending'
-       ORDER BY t.created_at DESC`
+         AND (t.preferred_gender IS NULL OR t.preferred_gender = $1)
+       ORDER BY t.created_at DESC`,
+      [myGender]
     );
     res.json(rows);
   } catch (err) {
@@ -187,12 +197,17 @@ router.get('/driver/my-trips', async (req, res) => {
 // POST /api/trips/:id/accept — المندوب يقبل الطلب
 router.post('/:id/accept', async (req, res) => {
   try {
+    // تحقق إن نوع المندوب مطابق لاختيار العميل (لو العميل حدد نوع معين)
+    const { rows: meRows } = await query(`SELECT gender FROM users WHERE id=$1`, [req.userId]);
+    const myGender = meRows[0]?.gender || null;
     const { rows } = await query(
       `UPDATE trips SET driver_id=$1, status='accepted', updated_at=now()
-       WHERE id=$2 AND status='pending' RETURNING *`,
-      [req.userId, req.params.id]
+       WHERE id=$2 AND status='pending'
+         AND (preferred_gender IS NULL OR preferred_gender=$3)
+       RETURNING *`,
+      [req.userId, req.params.id, myGender]
     );
-    if (!rows[0]) return res.status(400).json({ error: 'الطلب غير متاح' });
+    if (!rows[0]) return res.status(400).json({ error: 'الطلب غير متاح أو مخصص لنوع مندوب مختلف' });
 
     const trip = rows[0];
     req.app.locals.sendToUser?.(trip.customer_id, { type: 'trip_accepted', trip });
