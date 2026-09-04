@@ -118,6 +118,8 @@ router.get('/my', async (req, res) => {
 });
 
 // GET /api/trips/:id — تفاصيل طلب
+// ملحوظة: لازم يفضل آخر route بالـ GET في الملف — لأنه wildcard (:id) وهيبلع
+// أي مسار تاني زي /driver/available أو /settings لو اتحط قبلهم.
 router.get('/:id', async (req, res) => {
   try {
     const { rows } = await query(
@@ -129,7 +131,13 @@ router.get('/:id', async (req, res) => {
       [req.params.id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'الطلب غير موجود' });
-    res.json(rows[0]);
+    const trip = rows[0];
+    const isOwner  = trip.customer_id === req.userId;
+    const isDriver = trip.driver_id === req.userId;
+    if (!isOwner && !isDriver && req.userRole !== 'admin') {
+      return res.status(403).json({ error: 'غير مصرح' });
+    }
+    res.json(trip);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'تعذر تحميل الطلب' });
@@ -158,6 +166,7 @@ router.post('/:id/cancel', async (req, res) => {
 // (بيشوف بس الرحلات اللي preferred_gender فيها فاضي، أو مطابق لنوعه هو)
 router.get('/driver/available', async (req, res) => {
   try {
+    if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
     const { rows: meRows } = await query(`SELECT gender FROM users WHERE id=$1`, [req.userId]);
     const myGender = meRows[0]?.gender || null;
     const { rows } = await query(
@@ -179,6 +188,7 @@ router.get('/driver/available', async (req, res) => {
 // GET /api/trips/driver/my-trips — طلبات المندوب
 router.get('/driver/my-trips', async (req, res) => {
   try {
+    if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
     const { rows } = await query(
       `SELECT t.*, c.full_name AS customer_name, c.phone AS customer_phone
        FROM trips t
@@ -197,6 +207,7 @@ router.get('/driver/my-trips', async (req, res) => {
 // POST /api/trips/:id/accept — المندوب يقبل الطلب
 router.post('/:id/accept', async (req, res) => {
   try {
+    if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
     // تحقق إن نوع المندوب مطابق لاختيار العميل (لو العميل حدد نوع معين)
     const { rows: meRows } = await query(`SELECT gender FROM users WHERE id=$1`, [req.userId]);
     const myGender = meRows[0]?.gender || null;
@@ -222,6 +233,7 @@ router.post('/:id/accept', async (req, res) => {
 // POST /api/trips/:id/pickup — المندوب وصل لنقطة الانطلاق
 router.post('/:id/pickup', async (req, res) => {
   try {
+    if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
     const { rows } = await query(
       `UPDATE trips SET status='picked_up', updated_at=now()
        WHERE id=$1 AND driver_id=$2 AND status='accepted' RETURNING *`,
@@ -245,6 +257,7 @@ router.post('/:id/pickup', async (req, res) => {
 // POST /api/trips/:id/deliver — المندوب أتم التوصيل
 router.post('/:id/deliver', async (req, res) => {
   try {
+    if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
     const { rows } = await query(
       `UPDATE trips SET status='delivered', updated_at=now()
        WHERE id=$1 AND driver_id=$2 AND status='picked_up' RETURNING *`,
@@ -266,6 +279,7 @@ router.post('/:id/deliver', async (req, res) => {
 // GET /api/trips/admin/all — كل الطلبات
 router.get('/admin/all', async (req, res) => {
   try {
+    if (req.userRole !== 'admin') return res.status(403).json({ error: 'للأدمن فقط' });
     const { rows } = await query(
       `SELECT t.*,
               c.full_name AS customer_name, c.phone AS customer_phone,
@@ -285,6 +299,7 @@ router.get('/admin/all', async (req, res) => {
 // PUT /api/trips/admin/settings — تعديل الأسعار
 router.put('/admin/settings', async (req, res) => {
   try {
+    if (req.userRole !== 'admin') return res.status(403).json({ error: 'للأدمن فقط' });
     const { wassalni_price, wassal_li_price } = req.body || {};
     if (wassalni_price !== undefined)
       await query(`UPDATE app_settings SET value=$1 WHERE key='wassalni_price'`, [wassalni_price]);
