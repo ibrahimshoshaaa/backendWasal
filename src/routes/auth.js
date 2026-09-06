@@ -12,8 +12,26 @@ const { query } = require('../db');
 const { signToken } = require('../middleware/auth');
 const { upload, multerErrorHandler } = require('../middleware/uploader');
 const { uploadBuffer } = require('../config/cloudinary');
+const { generateVerificationCode, sendVerificationEmail } = require('../services/email');
 
 const router = express.Router();
+
+// ─── Rate limiting للتحقق من الإيميل — يمنع تجربة أكواد عشوائية أو spam إعادة إرسال ─
+const verifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'محاولات كتير، حاول تاني بعد شوية' },
+});
+
+const resendLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 دقايق
+  max: 3,                   // 3 طلبات إعادة إرسال بس كل 5 دقايق لكل IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'استنى شوية قبل ما تطلب كود تاني' },
+});
 
 // ─── Rate limiting — يمنع محاولات brute-force على الدخول وspam التسجيل ────────
 // بيحسب المحاولات لكل IP. لازم `app.set('trust proxy', 1)` يكون متحطوط في
@@ -51,6 +69,7 @@ function publicUser(row) {
     role: row.role,
     avatar_url: row.avatar_url,
     gender: row.gender || null,
+    email_verified: !!row.email_verified,
   };
 }
 
@@ -158,7 +177,77 @@ router.post('/register', registerLimiter, registerUpload, async (req, res) => {
       );
     }
 
+    // ── إرسال كود تحقق الإيميل — Best effort: لو فشل الإرسال، التسجيل ما بيتأثرش ──
+    // اليوزر بيقدر يستخدم حسابه عادي حتى لو مش متحقق؛ التحقق فيتشر إضافي دلوقتي.
+    try {
+      const code = generateVerificationCode();
+      await query(
+        `UPDATE users SET email_verify_code=$1, email_verify_expires=now() + interval '15 minutes' WHERE id=$2`,
+        [code, user.id]
+      );
+      sendVerificationEmail(user.email, code).catch(() => {});
+    } catch (e) {
+      console.error('[auth/register] failed to queue verification email:', e.message);
+    }
+
     res.json({ token: signToken(user), user: publicUser(user) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'حدث خطأ غير متوقع' });
+  }
+});
+
+// ─── تأكيد كود التحقق ────────────────────────────────────────────────────────
+router.post('/verify-email', verifyLimiter, async (req, res) => {
+  const { email, code } = req.body || {};
+  if (!email || !code) return res.status(400).json({ error: 'الإيميل والكود مطلوبين' });
+
+  try {
+    const { rows } = await query(
+      `SELECT id, email_verified, email_verify_code, email_verify_expires FROM users WHERE email=$1`,
+      [email]
+    );
+    const user = rows[0];
+    if (!user) return res.status(404).json({ error: 'الحساب مش موجود' });
+    if (user.email_verified) return res.json({ ok: true, already: true });
+
+    if (!user.email_verify_code || user.email_verify_code !== String(code).trim()) {
+      return res.status(400).json({ error: 'الكود غير صحيح' });
+    }
+    if (!user.email_verify_expires || new Date(user.email_verify_expires) < new Date()) {
+      return res.status(400).json({ error: 'الكود منتهي الصلاحية، اطلب كود جديد' });
+    }
+
+    await query(
+      `UPDATE users SET email_verified=true, email_verify_code=NULL, email_verify_expires=NULL WHERE id=$1`,
+      [user.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'حدث خطأ غير متوقع' });
+  }
+});
+
+// ─── إعادة إرسال كود التحقق ──────────────────────────────────────────────────
+router.post('/resend-verification', resendLimiter, async (req, res) => {
+  const { email } = req.body || {};
+  if (!email) return res.status(400).json({ error: 'الإيميل مطلوب' });
+
+  try {
+    const { rows } = await query(`SELECT id, email, email_verified FROM users WHERE email=$1`, [email]);
+    const user = rows[0];
+    // نفس الرد سواء الحساب موجود أو لأ — عشان محدش يستخدم الـ endpoint ده
+    // لمعرفة إيه الإيميلات المسجلة عندنا (user enumeration).
+    if (!user || user.email_verified) return res.json({ ok: true });
+
+    const code = generateVerificationCode();
+    await query(
+      `UPDATE users SET email_verify_code=$1, email_verify_expires=now() + interval '15 minutes' WHERE id=$2`,
+      [code, user.id]
+    );
+    sendVerificationEmail(user.email, code).catch(() => {});
+    res.json({ ok: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'حدث خطأ غير متوقع' });

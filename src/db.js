@@ -38,6 +38,17 @@ async function initSchema() {
   // ── جنس المستخدم (ذكر/أنثى) — للعميل عشان يختار جنس المندوب، وللمندوب عشان يظهر في الرحلات المناسبة له
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS gender TEXT CHECK (gender IN ('male','female') OR gender IS NULL)`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_public_id TEXT`);
+
+  // ── التحقق من الإيميل — كود 6 أرقام + وقت انتهاء صلاحية ─────────────────────
+  // email_verified بيبدأ false لأي حساب جديد. الحساب يفضل يشتغل عادي حتى لو
+  // مش متحقق منه (مش بنمنع الدخول أو الاستخدام) — التحقق ده إضافي فقط دلوقتي.
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verify_code TEXT`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verify_expires TIMESTAMPTZ`);
+  // الحسابات القديمة اللي كانت موجودة قبل الفيتشر ده منعتبرها متحققة تلقائيًا
+  // عشان ما نضايقش يوزرز موجودين فعلاً بطلب تحقق رجعي (بيتنفذ مرة واحدة بس
+  // فعليًا لأن أي حساب بعد كده بيتسجل بـ email_verified=false من الكود الجديد).
+  await query(`UPDATE users SET email_verified = true WHERE email_verify_code IS NULL AND email_verified = false`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS id_front_public_id TEXT`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS id_back_public_id TEXT`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS selfie_public_id TEXT`);
