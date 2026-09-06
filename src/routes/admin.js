@@ -229,12 +229,63 @@ router.get('/orders', async (req, res) => {
 router.put('/orders/:id/status', async (req, res) => {
   const { status } = req.body || {};
   if (!status) return res.status(400).json({ error: 'الحالة مطلوبة' });
-  const { rowCount } = await query('UPDATE orders SET status=$1 WHERE id=$2', [
-    status,
-    req.params.id,
-  ]);
-  if (!rowCount) return res.status(404).json({ error: 'الطلب غير موجود' });
-  res.json({ ok: true });
+
+  try {
+    const { rows } = await query(
+      `UPDATE orders SET status=$1,
+        accepted_at  = CASE WHEN $1='accepted'  AND accepted_at  IS NULL THEN now() ELSE accepted_at  END,
+        ready_at     = CASE WHEN $1='ready'     AND ready_at     IS NULL THEN now() ELSE ready_at     END,
+        picked_up_at = CASE WHEN $1='picked_up' AND picked_up_at IS NULL THEN now() ELSE picked_up_at END,
+        delivered_at = CASE WHEN $1='delivered' AND delivered_at IS NULL THEN now() ELSE delivered_at END,
+        cancelled_at = CASE WHEN $1='cancelled' AND cancelled_at IS NULL THEN now() ELSE cancelled_at END
+       WHERE id=$2
+       RETURNING *, (SELECT owner_user_id FROM merchants WHERE id=orders.merchant_id) AS merchant_owner_id`,
+      [status, req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'الطلب غير موجود' });
+
+    const order = rows[0];
+    const { createNotification } = require('../db');
+
+    const statusMessages = {
+      accepted:  { title: 'تم قبول طلبك ✅',      body: `طلبك رقم ${order.order_number} قُبل وبدأ في التجهيز`,      type: 'order_accepted'  },
+      ready:     { title: 'طلبك جاهز! 🎁',         body: `طلبك رقم ${order.order_number} جاهز وفي انتظار المندوب`,   type: 'order_ready'     },
+      picked_up: { title: 'المندوب في الطريق 🛵',   body: `المندوب استلم طلبك رقم ${order.order_number} وفي الطريق إليك`, type: 'order_picked_up' },
+      delivered: { title: 'تم توصيل طلبك 🎉',      body: `وصل طلبك رقم ${order.order_number} بنجاح!`,               type: 'order_delivered' },
+      cancelled: { title: 'تم إلغاء طلبك ❌',       body: `الطلب رقم ${order.order_number} تم إلغاؤه من الإدارة`,    type: 'order_cancelled' },
+    };
+
+    const msg = statusMessages[status];
+    if (msg) {
+      // إشعار العميل
+      createNotification(order.customer_id, { ...msg, orderId: order.id }).catch(() => {});
+      req.app.locals.sendToUser?.(order.customer_id, { type: 'notification', ...msg, orderId: order.id });
+
+      // إشعار المتجر عند الإلغاء أو التسليم
+      if ((status === 'cancelled' || status === 'delivered') && order.merchant_owner_id) {
+        const merchantMsg = status === 'cancelled'
+          ? { title: 'تم إلغاء طلب ❌', body: `الطلب رقم ${order.order_number} ألغته الإدارة`, type: 'order_cancelled', orderId: order.id }
+          : { title: 'تم تسليم الطلب ✅', body: `الطلب رقم ${order.order_number} وُصِّل بنجاح`, type: 'order_delivered', orderId: order.id };
+        createNotification(order.merchant_owner_id, merchantMsg).catch(() => {});
+        req.app.locals.sendToUser?.(order.merchant_owner_id, { type: 'notification', ...merchantMsg });
+      }
+
+      // إشعار المندوب عند التعيين أو الإلغاء
+      if (order.driver_id) {
+        if (status === 'cancelled') {
+          createNotification(order.driver_id, {
+            title: 'تم إلغاء الطلب', body: `الطلب رقم ${order.order_number} ألغته الإدارة`, type: 'order_cancelled', orderId: order.id,
+          }).catch(() => {});
+          req.app.locals.sendToUser?.(order.driver_id, { type: 'notification', title: 'تم إلغاء الطلب', orderId: order.id });
+        }
+      }
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('PUT /admin/orders/:id/status error:', err);
+    res.status(500).json({ error: 'فشل تحديث حالة الطلب' });
+  }
 });
 
 // ─── نظام مكافحة الطلبات الوهمية ─────────────────────────────────────────────
@@ -499,6 +550,251 @@ router.put('/merchants/:id/linked-drivers', async (req, res) => {
   } catch (err) {
     console.error('PUT /admin/merchants/:id/linked-drivers error:', err);
     res.status(500).json({ error: 'فشل حفظ ربط المناديب' });
+  }
+});
+
+// ─── إحصائيات الهوم ──────────────────────────────────────────────────────────
+router.get('/stats/overview', async (req, res) => {
+  try {
+    const [
+      usersR, merchantsR, driversR,
+      revenueR, ordersR, tripsR, hataaliR,
+      onlineDriversR, fraudR, topMerchantsR, peakHoursR,
+    ] = await Promise.all([
+      query(`SELECT COUNT(*)::int AS n FROM users WHERE role='customer'`),
+      query(`SELECT
+               COUNT(*)::int AS total,
+               COUNT(*) FILTER (WHERE status='pending')::int AS pending,
+               COUNT(*) FILTER (WHERE status='active')::int  AS active
+             FROM merchants`),
+      query(`SELECT
+               COUNT(*)::int AS total,
+               COUNT(*) FILTER (WHERE driver_status='pending')::int AS pending,
+               COUNT(*) FILTER (WHERE is_online=true)::int           AS online
+             FROM users WHERE role='driver'`),
+      query(`SELECT
+               COALESCE(SUM(total) FILTER (WHERE created_at::date = CURRENT_DATE),0)::numeric           AS today,
+               COALESCE(SUM(total) FILTER (WHERE created_at >= CURRENT_DATE - 6),0)::numeric             AS week,
+               COALESCE(SUM(total) FILTER (WHERE date_trunc('month',created_at)=date_trunc('month',now())),0)::numeric AS month
+             FROM orders WHERE status='delivered'`),
+      query(`SELECT
+               COUNT(*)::int AS total,
+               COUNT(*) FILTER (WHERE status='pending')::int   AS pending,
+               COUNT(*) FILTER (WHERE status='delivered')::int AS delivered,
+               COUNT(*) FILTER (WHERE status='cancelled')::int AS cancelled,
+               COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE)::int AS today,
+               ROUND(AVG(EXTRACT(EPOCH FROM (delivered_at - picked_up_at))/60) FILTER (WHERE status='delivered'),1)::numeric AS avg_delivery_min
+             FROM orders`),
+      query(`SELECT COALESCE(SUM(price),0)::numeric AS total, COUNT(*)::int AS count FROM trips WHERE status='delivered'`),
+      query(`SELECT COALESCE(SUM(delivery_fee),0)::numeric AS total, COUNT(*)::int AS count FROM hataali_orders WHERE status='delivered'`),
+      query(`SELECT COUNT(*)::int AS n FROM users WHERE role='driver' AND is_online=true`),
+      query(`SELECT COUNT(*)::int AS n FROM fraud_flags WHERE resolved=false`),
+      query(`SELECT m.name, m.id,
+               COUNT(o.id)::int AS orders_count,
+               COALESCE(SUM(o.total),0)::numeric AS revenue
+             FROM merchants m
+             LEFT JOIN orders o ON o.merchant_id=m.id AND o.status='delivered'
+               AND o.created_at::date=CURRENT_DATE
+             GROUP BY m.id, m.name
+             ORDER BY revenue DESC LIMIT 5`),
+      query(`SELECT EXTRACT(HOUR FROM created_at)::int AS hour, COUNT(*)::int AS count
+             FROM orders WHERE created_at >= CURRENT_DATE - 6
+             GROUP BY hour ORDER BY hour`),
+    ]);
+    res.json({
+      customers:      usersR.rows[0].n,
+      merchants:      merchantsR.rows[0],
+      drivers:        driversR.rows[0],
+      revenue:        revenueR.rows[0],
+      orders:         ordersR.rows[0],
+      trips:          tripsR.rows[0],
+      hataali:        hataaliR.rows[0],
+      online_drivers: onlineDriversR.rows[0].n,
+      fraud_flags:    fraudR.rows[0].n,
+      top_merchants:  topMerchantsR.rows,
+      peak_hours:     peakHoursR.rows,
+    });
+  } catch (err) {
+    console.error('GET /admin/stats/overview error:', err);
+    res.status(500).json({ error: 'فشل تحميل الإحصائيات' });
+  }
+});
+
+// ─── تقرير الإيرادات آخر 30 يوم ──────────────────────────────────────────────
+router.get('/stats/revenue', async (req, res) => {
+  try {
+    const { rows } = await query(`
+      SELECT
+        gs.day::date AS date,
+        COALESCE(SUM(o.total) FILTER (WHERE o.status='delivered'),0)::numeric AS orders_revenue,
+        COALESCE(SUM(t.price),0)::numeric AS trips_revenue,
+        COALESCE(SUM(h.delivery_fee),0)::numeric AS hataali_revenue
+      FROM generate_series(CURRENT_DATE-29, CURRENT_DATE, '1 day') AS gs(day)
+      LEFT JOIN orders o ON o.created_at::date = gs.day
+      LEFT JOIN trips  t ON t.created_at::date = gs.day AND t.status='delivered'
+      LEFT JOIN hataali_orders h ON h.created_at::date = gs.day AND h.status='delivered'
+      GROUP BY gs.day ORDER BY gs.day
+    `);
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحميل تقرير الإيرادات' });
+  }
+});
+
+// ─── تفاصيل طلب واحد ─────────────────────────────────────────────────────────
+router.get('/orders/:id', async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT o.*,
+              c.full_name AS customer_name, c.phone AS customer_phone,
+              m.name AS merchant_name, m.phone AS merchant_phone,
+              m.address AS merchant_address, m.lat AS merchant_lat, m.lng AS merchant_lng,
+              a.address_text AS delivery_address, a.lat AS delivery_lat, a.lng AS delivery_lng,
+              d.full_name AS driver_name, d.phone AS driver_phone
+       FROM orders o
+       LEFT JOIN users c ON c.id = o.customer_id
+       LEFT JOIN merchants m ON m.id = o.merchant_id
+       LEFT JOIN addresses a ON a.id = o.address_id
+       LEFT JOIN users d ON d.id = o.driver_id
+       WHERE o.id = $1`, [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'الطلب غير موجود' });
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحميل الطلب' });
+  }
+});
+
+// ─── تعيين مندوب لطلب ────────────────────────────────────────────────────────
+router.put('/orders/:id/driver', async (req, res) => {
+  try {
+    const { driver_id } = req.body || {};
+    if (!driver_id) return res.status(400).json({ error: 'driver_id مطلوب' });
+
+    const { rows } = await query(
+      `UPDATE orders SET driver_id=$1 WHERE id=$2
+       RETURNING id, order_number, status, customer_id, merchant_id`,
+      [driver_id, req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'الطلب غير موجود' });
+
+    const order = rows[0];
+    const { createNotification } = require('../db');
+
+    // إشعار المندوب المعيّن
+    createNotification(driver_id, {
+      title: 'تم تعيينك لطلب 🛵',
+      body: `تم تعيينك لتوصيل الطلب رقم ${order.order_number}`,
+      type: 'order_assigned',
+      orderId: order.id,
+    }).catch(() => {});
+    req.app.locals.sendToUser?.(driver_id, {
+      type: 'notification',
+      title: 'تم تعيينك لطلب 🛵',
+      body: `تم تعيينك لتوصيل الطلب رقم ${order.order_number}`,
+      orderId: order.id,
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تعيين المندوب' });
+  }
+});
+
+// ─── مواقع المناديب الأونلاين ─────────────────────────────────────────────────
+router.get('/drivers/live', async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT id, full_name, phone, driver_lat, driver_lng, vehicle_type, gender
+       FROM users WHERE role='driver' AND is_online=true
+         AND driver_lat IS NOT NULL AND driver_lng IS NOT NULL`
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحميل مواقع المناديب' });
+  }
+});
+
+// ─── إحصائيات مندوب واحد ─────────────────────────────────────────────────────
+router.get('/drivers/:id/stats', async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT
+         COUNT(*)::int AS total_orders,
+         COUNT(*) FILTER (WHERE status='delivered')::int AS delivered,
+         COUNT(*) FILTER (WHERE status='cancelled')::int AS cancelled,
+         COALESCE(SUM(delivery_fee) FILTER (WHERE status='delivered'),0)::numeric AS total_earnings,
+         ROUND(AVG(driver_rating) FILTER (WHERE driver_rating IS NOT NULL),1)::numeric AS avg_rating,
+         ROUND(AVG(EXTRACT(EPOCH FROM (delivered_at - picked_up_at))/60) FILTER (WHERE status='delivered'),1)::numeric AS avg_delivery_min
+       FROM orders WHERE driver_id=$1`, [req.params.id]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحميل إحصائيات المندوب' });
+  }
+});
+
+// ─── إحصائيات متجر واحد ──────────────────────────────────────────────────────
+router.get('/merchants/:id/stats', async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT
+         COUNT(*)::int AS total_orders,
+         COUNT(*) FILTER (WHERE status='delivered')::int AS delivered,
+         COUNT(*) FILTER (WHERE status='cancelled')::int AS cancelled,
+         COALESCE(SUM(total) FILTER (WHERE status='delivered'),0)::numeric AS total_revenue,
+         ROUND(AVG(rating) FILTER (WHERE rating IS NOT NULL),1)::numeric AS avg_rating,
+         ROUND(AVG(EXTRACT(EPOCH FROM (delivered_at - picked_up_at))/60) FILTER (WHERE status='delivered'),1)::numeric AS avg_delivery_min
+       FROM orders WHERE merchant_id=$1`, [req.params.id]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحميل إحصائيات المتجر' });
+  }
+});
+
+// ─── إعدادات التطبيق (get + update) ─────────────────────────────────────────
+router.get('/settings', async (req, res) => {
+  try {
+    const { rows } = await query(`SELECT key, value FROM app_settings`);
+    const settings = Object.fromEntries(rows.map(r => [r.key, r.value]));
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ error: 'فشل تحميل الإعدادات' });
+  }
+});
+
+router.put('/settings', async (req, res) => {
+  try {
+    const allowed = ['hataali_fee', 'wassalni_price', 'wassal_li_price'];
+    const updates = Object.entries(req.body).filter(([k]) => allowed.includes(k));
+    if (!updates.length) return res.status(400).json({ error: 'لا توجد قيم صالحة للتحديث' });
+    for (const [key, value] of updates) {
+      await query(
+        `INSERT INTO app_settings (key,value) VALUES ($1,$2)
+         ON CONFLICT (key) DO UPDATE SET value=$2`, [key, String(value)]
+      );
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'فشل حفظ الإعدادات' });
+  }
+});
+
+// ─── إشعار جماعي broadcast ───────────────────────────────────────────────────
+router.post('/notifications/broadcast', async (req, res) => {
+  try {
+    const { title, body, role } = req.body || {};
+    if (!title || !body) return res.status(400).json({ error: 'title و body مطلوبان' });
+    const roleFilter = ['customer', 'driver', 'merchant'].includes(role) ? `WHERE role='${role}'` : '';
+    const { rows } = await query(`SELECT id FROM users ${roleFilter}`);
+    const { createNotification } = require('../db');
+    for (const u of rows) {
+      createNotification(u.id, { title, body, type: 'broadcast' }).catch(() => {});
+    }
+    res.json({ ok: true, sent_to: rows.length });
+  } catch (err) {
+    res.status(500).json({ error: 'فشل إرسال الإشعار' });
   }
 });
 

@@ -1,5 +1,5 @@
 const express = require('express');
-const { query, notifyOnlineDrivers } = require('../db');
+const { query, notifyOnlineDrivers, createNotification } = require('../db');
 const router = express.Router();
 
 // ─── Customer ─────────────────────────────────────────────────────────────────
@@ -113,14 +113,16 @@ router.post('/:id/accept', async (req, res) => {
     );
     if (!rows.length) return res.status(409).json({ error: 'الطلب غير متاح أو تم أخذه من مندوب آخر' });
 
-    // إشعار للعميل
     const order = rows[0];
     const sendToUser = req.app.locals.sendToUser;
-    sendToUser(order.customer_id, { type: 'notification', message: 'المندوب في الطريق لجلب طلبك!' });
-    await query(
-      `INSERT INTO notifications (user_id, title, body, type) VALUES ($1,$2,$3,'hataali')`,
-      [order.customer_id, 'طلب هاتهالي', 'المندوب قبل طلبك وفي الطريق!']
-    );
+
+    // إشعار للعميل (DB + FCM Push)
+    await createNotification(order.customer_id, {
+      title: 'طلب هاتهالي 🛵',
+      body: 'المندوب قبل طلبك وفي الطريق لجلبه!',
+      type: 'hataali',
+    });
+    sendToUser?.(order.customer_id, { type: 'notification', message: 'المندوب في الطريق لجلب طلبك!' });
 
     res.json(rows[0]);
   } catch (err) {
@@ -145,11 +147,14 @@ router.post('/:id/deliver', async (req, res) => {
 
     const order = rows[0];
     const sendToUser = req.app.locals.sendToUser;
-    sendToUser(order.customer_id, { type: 'notification', message: 'تم توصيل طلبك!' });
-    await query(
-      `INSERT INTO notifications (user_id, title, body, type) VALUES ($1,$2,$3,'hataali')`,
-      [order.customer_id, 'تم التوصيل', 'تم توصيل طلب هاتهالي بنجاح']
-    );
+
+    // إشعار للعميل (DB + FCM Push)
+    await createNotification(order.customer_id, {
+      title: 'تم التوصيل 🎉',
+      body: 'تم توصيل طلب هاتهالي بنجاح!',
+      type: 'hataali',
+    });
+    sendToUser?.(order.customer_id, { type: 'notification', message: 'تم توصيل طلبك!' });
 
     res.json(rows[0]);
   } catch (err) {

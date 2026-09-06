@@ -153,6 +153,17 @@ router.post('/:id/cancel', async (req, res) => {
       [req.params.id, req.userId]
     );
     if (!rows[0]) return res.status(400).json({ error: 'لا يمكن إلغاء الطلب' });
+
+    // لو كان في مندوب معين (مش pending عادةً بس احتياطاً)
+    const trip = rows[0];
+    if (trip.driver_id) {
+      notify(req, trip.driver_id, {
+        title: 'تم إلغاء الطلب ❌',
+        body: 'ألغى العميل الطلب',
+        type: 'trip',
+      });
+    }
+
     res.json(rows[0]);
   } catch (err) {
     console.error(err);
@@ -265,9 +276,16 @@ router.post('/:id/deliver', async (req, res) => {
     );
     if (!rows[0]) return res.status(400).json({ error: 'لا يمكن إتمام الطلب' });
 
-    req.app.locals.sendToUser?.(rows[0].customer_id, { type: 'trip_delivered', trip: rows[0] });
-    notify(req, rows[0].customer_id, { title: 'تم التوصيل', body: 'وصل طلبك بنجاح', type: 'trip' });
-    res.json(rows[0]);
+    const trip = rows[0];
+    req.app.locals.sendToUser?.(trip.customer_id, { type: 'trip_delivered', trip });
+
+    // إشعار العميل
+    notify(req, trip.customer_id, { title: 'تم التوصيل 🎉', body: 'وصل طلبك بنجاح', type: 'trip' });
+
+    // إشعار الأدمن
+    await notifyAdmins(req, 'تم إتمام رحلة ✅', `رحلة #${trip.id} تم تسليمها`, 'trip');
+
+    res.json(trip);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'تعذر إتمام الطلب' });
