@@ -59,6 +59,12 @@ function buildHtml(code) {
   `;
 }
 
+// نسخة نصية عادية (Plain Text) بجانب الـ HTML — رسائل فيها الاتنين مع بعض
+// بتقلل مؤشرات السبام فيلترز، وده معيار أساسي في أي إيميل تحقق احترافي.
+function buildText(code) {
+  return `مرحبًا بك في وصل\n\nكود تفعيل بريدك الإلكتروني هو: ${code}\n\nالكود صالح لمدة 15 دقيقة. لو مطلبتش الكود ده، تجاهل الرسالة.`;
+}
+
 async function trySendGrid(toEmail, code) {
   if (!ensureSendGrid()) return false;
   const fromEmail = process.env.SENDGRID_FROM_EMAIL;
@@ -68,6 +74,7 @@ async function trySendGrid(toEmail, code) {
       to: toEmail,
       from: { email: fromEmail, name: 'Wasal' },
       subject: 'كود تفعيل حسابك في وصل',
+      text: buildText(code),
       html: buildHtml(code),
     });
     return true;
@@ -92,6 +99,7 @@ function tryMailjet(toEmail, code) {
           From: { Email: fromEmail, Name: 'Wasal' },
           To: [{ Email: toEmail }],
           Subject: 'كود تفعيل حسابك في وصل',
+          TextPart: buildText(code),
           HTMLPart: buildHtml(code),
         },
       ],
