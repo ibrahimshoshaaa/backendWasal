@@ -145,8 +145,14 @@ function tryMailjet(toEmail, code) {
 // بيرجع { sent: boolean } — أبدًا مش بيرمي error عشان فشل الإيميل ميوقفش
 // عملية التسجيل نفسها.
 async function sendVerificationEmail(toEmail, code) {
-  if (await trySendGrid(toEmail, code)) return { sent: true, via: 'sendgrid' };
-  if (await tryMailjet(toEmail, code)) return { sent: true, via: 'mailjet' };
+  if (await trySendGrid(toEmail, code)) {
+    console.log('[email] sent via SendGrid ✔');
+    return { sent: true, via: 'sendgrid' };
+  }
+  if (await tryMailjet(toEmail, code)) {
+    console.log('[email] sent via Mailjet ✔ (SendGrid fallback triggered)');
+    return { sent: true, via: 'mailjet' };
+  }
   console.warn('[email] both providers failed or unconfigured — skipping send. Code was:', code);
   return { sent: false };
 }

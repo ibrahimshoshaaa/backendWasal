@@ -16,6 +16,20 @@ const { generateVerificationCode, sendVerificationEmail } = require('../services
 
 const router = express.Router();
 
+// ─── مدة صلاحية الكود، ومدة الانتظار الإجبارية قبل السماح بكود جديد ───────────
+const CODE_EXPIRY_MS = 15 * 60 * 1000; // 15 دقيقة
+const RESEND_COOLDOWN_MS = 5 * 60 * 1000; // 5 دقايق
+
+// email_verify_expires بيتحط دايمًا = وقت الإرسال + 15 دقيقة، فنقدر نرجع نحسب
+// "وقت الإرسال" منها، ونحسب منه هل الـ 5 دقايق عدت ولا لأ.
+function cooldownRemainingSeconds(user) {
+  if (!user.email_verify_expires) return 0;
+  const sentAt = new Date(user.email_verify_expires).getTime() - CODE_EXPIRY_MS;
+  const elapsed = Date.now() - sentAt;
+  if (elapsed >= RESEND_COOLDOWN_MS) return 0;
+  return Math.ceil((RESEND_COOLDOWN_MS - elapsed) / 1000);
+}
+
 // ─── Rate limiting للتحقق من الإيميل — يمنع تجربة أكواد عشوائية أو spam إعادة إرسال ─
 const verifyLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -190,7 +204,7 @@ router.post('/register', registerLimiter, registerUpload, async (req, res) => {
       console.error('[auth/register] failed to queue verification email:', e.message);
     }
 
-    res.json({ needsVerification: true, email: user.email });
+    res.json({ needsVerification: true, email: user.email, cooldownRemaining: Math.ceil(RESEND_COOLDOWN_MS / 1000) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'حدث خطأ غير متوقع' });
@@ -261,11 +275,22 @@ router.post('/resend-verification', resendLimiter, async (req, res) => {
   if (!email) return res.status(400).json({ error: 'الإيميل مطلوب' });
 
   try {
-    const { rows } = await query(`SELECT id, email, email_verified FROM users WHERE email=$1`, [email]);
+    const { rows } = await query(
+      `SELECT id, email, email_verified, email_verify_expires FROM users WHERE email=$1`,
+      [email]
+    );
     const user = rows[0];
     // نفس الرد سواء الحساب موجود أو لأ — عشان محدش يستخدم الـ endpoint ده
     // لمعرفة إيه الإيميلات المسجلة عندنا (user enumeration).
     if (!user || user.email_verified) return res.json({ ok: true });
+
+    const remaining = cooldownRemainingSeconds(user);
+    if (remaining > 0) {
+      return res.status(429).json({
+        error: `استنى ${Math.ceil(remaining / 60)} دقيقة قبل ما تطلب كود تاني`,
+        cooldownRemaining: remaining,
+      });
+    }
 
     const code = generateVerificationCode();
     await query(
@@ -273,7 +298,7 @@ router.post('/resend-verification', resendLimiter, async (req, res) => {
       [code, user.id]
     );
     sendVerificationEmail(user.email, code).catch(() => {});
-    res.json({ ok: true });
+    res.json({ ok: true, cooldownRemaining: Math.ceil(RESEND_COOLDOWN_MS / 1000) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'حدث خطأ غير متوقع' });
@@ -293,7 +318,16 @@ router.post('/login', loginLimiter, async (req, res) => {
     if (!ok) return res.status(401).json({ error: 'بيانات الدخول غير صحيحة' });
 
     if (!user.email_verified) {
-      // نبعتله كود جديد فورًا عشان ميضطرش يدوس على "إعادة إرسال" يدويًا
+      const remaining = cooldownRemainingSeconds(user);
+      if (remaining > 0) {
+        return res.status(403).json({
+          error: 'الرجاء تفعيل بريدك الإلكتروني الأول',
+          needsVerification: true,
+          email: user.email,
+          cooldownRemaining: remaining,
+        });
+      }
+      // معدّاش 5 دقايق على آخر كود — نبعت كود جديد
       try {
         const code = generateVerificationCode();
         await query(
@@ -306,6 +340,7 @@ router.post('/login', loginLimiter, async (req, res) => {
         error: 'الرجاء تفعيل بريدك الإلكتروني الأول',
         needsVerification: true,
         email: user.email,
+        cooldownRemaining: Math.ceil(RESEND_COOLDOWN_MS / 1000),
       });
     }
 
