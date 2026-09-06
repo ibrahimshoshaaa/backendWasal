@@ -190,39 +190,65 @@ router.post('/register', registerLimiter, registerUpload, async (req, res) => {
       console.error('[auth/register] failed to queue verification email:', e.message);
     }
 
-    res.json({ token: signToken(user), user: publicUser(user) });
+    res.json({ needsVerification: true, email: user.email });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'حدث خطأ غير متوقع' });
   }
 });
 
-// ─── تأكيد كود التحقق ────────────────────────────────────────────────────────
+// ─── تأكيد كود التحقق — دي اللحظة اللي فعليًا بيتاح فيها الدخول (token) ────────
 router.post('/verify-email', verifyLimiter, async (req, res) => {
   const { email, code } = req.body || {};
   if (!email || !code) return res.status(400).json({ error: 'الإيميل والكود مطلوبين' });
 
   try {
     const { rows } = await query(
-      `SELECT id, email_verified, email_verify_code, email_verify_expires FROM users WHERE email=$1`,
+      `SELECT * FROM users WHERE email=$1`,
       [email]
     );
-    const user = rows[0];
+    let user = rows[0];
     if (!user) return res.status(404).json({ error: 'الحساب مش موجود' });
-    if (user.email_verified) return res.json({ ok: true, already: true });
 
-    if (!user.email_verify_code || user.email_verify_code !== String(code).trim()) {
-      return res.status(400).json({ error: 'الكود غير صحيح' });
-    }
-    if (!user.email_verify_expires || new Date(user.email_verify_expires) < new Date()) {
-      return res.status(400).json({ error: 'الكود منتهي الصلاحية، اطلب كود جديد' });
+    if (!user.email_verified) {
+      if (!user.email_verify_code || user.email_verify_code !== String(code).trim()) {
+        return res.status(400).json({ error: 'الكود غير صحيح' });
+      }
+      if (!user.email_verify_expires || new Date(user.email_verify_expires) < new Date()) {
+        return res.status(400).json({ error: 'الكود منتهي الصلاحية، اطلب كود جديد' });
+      }
+      const { rows: updated } = await query(
+        `UPDATE users SET email_verified=true, email_verify_code=NULL, email_verify_expires=NULL WHERE id=$1 RETURNING *`,
+        [user.id]
+      );
+      user = updated[0];
     }
 
-    await query(
-      `UPDATE users SET email_verified=true, email_verify_code=NULL, email_verify_expires=NULL WHERE id=$1`,
-      [user.id]
-    );
-    res.json({ ok: true });
+    // نفس شروط الموافقة الموجودة أصلاً في /login — التحقق من الإيميل لوحده
+    // مش كافي لدخول تاجر/مندوب لسه تحت مراجعة الإدارة.
+    if (user.role === 'driver' && user.driver_status !== 'active') {
+      const msg =
+        user.driver_status === 'suspended'
+          ? 'تم رفض حسابك أو إيقافه. تواصل مع الإدارة.'
+          : 'تم تفعيل بريدك الإلكتروني. حسابك لسه تحت المراجعة من الإدارة، هيتفعل قريباً.';
+      return res.json({ ok: true, verified: true, pendingApproval: true, error: msg });
+    }
+    if (user.role === 'merchant') {
+      const { rows: merchantRows } = await query(
+        'SELECT status FROM merchants WHERE owner_user_id=$1 LIMIT 1',
+        [user.id]
+      );
+      const merchantStatus = merchantRows[0]?.status;
+      if (merchantStatus && merchantStatus !== 'approved') {
+        const msg =
+          merchantStatus === 'suspended'
+            ? 'تم إيقاف حساب متجرك. تواصل مع الإدارة.'
+            : 'تم تفعيل بريدك الإلكتروني. حساب متجرك لسه تحت المراجعة من الإدارة، هيتفعل قريباً.';
+        return res.json({ ok: true, verified: true, pendingApproval: true, error: msg });
+      }
+    }
+
+    res.json({ ok: true, verified: true, token: signToken(user), user: publicUser(user) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'حدث خطأ غير متوقع' });
@@ -265,6 +291,23 @@ router.post('/login', loginLimiter, async (req, res) => {
 
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ error: 'بيانات الدخول غير صحيحة' });
+
+    if (!user.email_verified) {
+      // نبعتله كود جديد فورًا عشان ميضطرش يدوس على "إعادة إرسال" يدويًا
+      try {
+        const code = generateVerificationCode();
+        await query(
+          `UPDATE users SET email_verify_code=$1, email_verify_expires=now() + interval '15 minutes' WHERE id=$2`,
+          [code, user.id]
+        );
+        sendVerificationEmail(user.email, code).catch(() => {});
+      } catch (_) {}
+      return res.status(403).json({
+        error: 'الرجاء تفعيل بريدك الإلكتروني الأول',
+        needsVerification: true,
+        email: user.email,
+      });
+    }
 
     if (user.role === 'driver' && user.driver_status !== 'active') {
       const msg =
