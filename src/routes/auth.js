@@ -176,8 +176,8 @@ router.post('/register', registerLimiter, registerUpload, async (req, res) => {
         }
       }
       await query(
-        `INSERT INTO merchants (owner_user_id, name, image_url, image_public_id, address, phone, tags, category_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        `INSERT INTO merchants (owner_user_id, name, image_url, image_public_id, address, phone, tags, category_id, lat, lng)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         [
           user.id,
           req.body.store_name || full_name,
@@ -187,6 +187,8 @@ router.post('/register', registerLimiter, registerUpload, async (req, res) => {
           phone || null,
           JSON.stringify(tags),
           req.body.category_id ? parseInt(req.body.category_id, 10) : null,
+          req.body.latitude ? parseFloat(req.body.latitude) : null,
+          req.body.longitude ? parseFloat(req.body.longitude) : null,
         ]
       );
     }
