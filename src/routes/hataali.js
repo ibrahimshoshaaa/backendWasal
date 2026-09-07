@@ -104,22 +104,24 @@ router.post('/:id/accept', async (req, res) => {
   try {
     if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
 
+    const otp = String(Math.floor(1000 + Math.random() * 9000));
+
     const { rows } = await query(
       `UPDATE hataali_orders
-       SET driver_id=$1, status='picked_up', updated_at=now()
+       SET driver_id=$1, status='picked_up', updated_at=now(), delivery_otp=$3
        WHERE id=$2 AND status='approved' AND driver_id IS NULL
        RETURNING *`,
-      [req.userId, req.params.id]
+      [req.userId, req.params.id, otp]
     );
     if (!rows.length) return res.status(409).json({ error: 'الطلب غير متاح أو تم أخذه من مندوب آخر' });
 
     const order = rows[0];
     const sendToUser = req.app.locals.sendToUser;
 
-    // إشعار للعميل (DB + FCM Push)
+    // إشعار للعميل (DB + FCM Push) — شامل كود التسليم
     await createNotification(order.customer_id, {
       title: 'طلب هاتهالي 🛵',
-      body: 'المندوب قبل طلبك وفي الطريق لجلبه!',
+      body: `المندوب قبل طلبك وفي الطريق لجلبه! كود التسليم: ${otp}`,
       type: 'hataali',
     });
     sendToUser?.(order.customer_id, { type: 'notification', message: 'المندوب في الطريق لجلب طلبك!' });
@@ -135,6 +137,18 @@ router.post('/:id/accept', async (req, res) => {
 router.post('/:id/deliver', async (req, res) => {
   try {
     if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
+
+    const otp = (req.body?.otp ?? '').toString().trim();
+    if (!otp) return res.status(400).json({ error: 'أدخل كود التسليم اللي مع العميل' });
+
+    const { rows: check } = await query(
+      `SELECT delivery_otp FROM hataali_orders WHERE id=$1 AND driver_id=$2 AND status='picked_up'`,
+      [req.params.id, req.userId]
+    );
+    if (!check.length) return res.status(404).json({ error: 'الطلب مش موجود' });
+    if (check[0].delivery_otp && check[0].delivery_otp !== otp) {
+      return res.status(400).json({ error: 'كود التسليم غير صحيح' });
+    }
 
     const { rows } = await query(
       `UPDATE hataali_orders
@@ -285,6 +299,36 @@ router.get('/:id', async (req, res) => {
   } catch (err) {
     console.error('GET /hataali/:id error:', err);
     res.status(500).json({ error: 'تعذر تحميل الطلب' });
+  }
+});
+
+// POST /api/hataali/:id/message — رسالة جاهزة من المندوب للعميل (إشعار داخل التطبيق)
+router.post('/:id/message', async (req, res) => {
+  try {
+    if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
+
+    const text = (req.body?.text ?? '').toString().trim();
+    if (!text) return res.status(400).json({ error: 'الرسالة فارغة' });
+    if (text.length > 200) return res.status(400).json({ error: 'الرسالة طويلة جداً' });
+
+    const { rows } = await query(
+      `SELECT id, customer_id FROM hataali_orders WHERE id=$1 AND driver_id=$2`,
+      [req.params.id, req.userId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'الطلب غير موجود' });
+
+    const order = rows[0];
+    await createNotification(order.customer_id, {
+      title: 'رسالة من المندوب',
+      body: text,
+      type: 'hataali',
+    });
+    req.app.locals.sendToUser?.(order.customer_id, { type: 'notification', message: text });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /hataali/:id/message error:', err);
+    res.status(500).json({ error: 'فشل إرسال الرسالة' });
   }
 });
 

@@ -222,18 +222,23 @@ router.post('/:id/accept', async (req, res) => {
     // تحقق إن نوع المندوب مطابق لاختيار العميل (لو العميل حدد نوع معين)
     const { rows: meRows } = await query(`SELECT gender FROM users WHERE id=$1`, [req.userId]);
     const myGender = meRows[0]?.gender || null;
+    const otp = String(Math.floor(1000 + Math.random() * 9000));
     const { rows } = await query(
-      `UPDATE trips SET driver_id=$1, status='accepted', updated_at=now()
+      `UPDATE trips SET driver_id=$1, status='accepted', updated_at=now(), delivery_otp=$4
        WHERE id=$2 AND status='pending'
          AND (preferred_gender IS NULL OR preferred_gender=$3)
        RETURNING *`,
-      [req.userId, req.params.id, myGender]
+      [req.userId, req.params.id, myGender, otp]
     );
     if (!rows[0]) return res.status(400).json({ error: 'الطلب غير متاح أو مخصص لنوع مندوب مختلف' });
 
     const trip = rows[0];
     req.app.locals.sendToUser?.(trip.customer_id, { type: 'trip_accepted', trip });
-    notify(req, trip.customer_id, { title: 'تم قبول طلبك', body: 'المندوب في الطريق إليك', type: 'trip' });
+    notify(req, trip.customer_id, {
+      title: 'تم قبول طلبك',
+      body: `المندوب في الطريق إليك. قوله كود التأكيد ده وقت الصعود: ${otp}`,
+      type: 'trip',
+    });
     res.json(trip);
   } catch (err) {
     console.error(err);
@@ -245,6 +250,19 @@ router.post('/:id/accept', async (req, res) => {
 router.post('/:id/pickup', async (req, res) => {
   try {
     if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
+
+    const otp = (req.body?.otp ?? '').toString().trim();
+    if (!otp) return res.status(400).json({ error: 'اطلب كود التأكيد من الراكب قبل بدء الرحلة' });
+
+    const { rows: check } = await query(
+      `SELECT delivery_otp FROM trips WHERE id=$1 AND driver_id=$2 AND status='accepted'`,
+      [req.params.id, req.userId]
+    );
+    if (!check.length) return res.status(400).json({ error: 'لا يمكن تحديث الحالة' });
+    if (check[0].delivery_otp && check[0].delivery_otp !== otp) {
+      return res.status(400).json({ error: 'كود التأكيد غير صحيح' });
+    }
+
     const { rows } = await query(
       `UPDATE trips SET status='picked_up', updated_at=now()
        WHERE id=$1 AND driver_id=$2 AND status='accepted' RETURNING *`,
@@ -327,6 +345,31 @@ router.put('/admin/settings', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'تعذر تحديث الأسعار' });
+  }
+});
+
+// POST /api/trips/:id/message — رسالة جاهزة من المندوب للراكب (إشعار داخل التطبيق)
+router.post('/:id/message', async (req, res) => {
+  try {
+    if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
+
+    const text = (req.body?.text ?? '').toString().trim();
+    if (!text) return res.status(400).json({ error: 'الرسالة فارغة' });
+    if (text.length > 200) return res.status(400).json({ error: 'الرسالة طويلة جداً' });
+
+    const { rows } = await query(
+      `SELECT id, customer_id FROM trips WHERE id=$1 AND driver_id=$2`,
+      [req.params.id, req.userId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'الرحلة غير موجودة' });
+
+    const trip = rows[0];
+    notify(req, trip.customer_id, { title: 'رسالة من المندوب', body: text, type: 'trip' });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'فشل إرسال الرسالة' });
   }
 });
 

@@ -236,6 +236,10 @@ async function initSchema() {
   await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_rating INT`);
   await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_rating_comment TEXT`);
 
+  // ── كود تحقق التسليم (OTP) — بيتولد وقت استلام المندوب للطلب، ويتبعت للعميل
+  // كإشعار داخل التطبيق، والمندوب لازم يدخله من العميل عشان يقفل الطلب ──────────
+  await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_otp TEXT`);
+
   // Generate order_number for old rows that don't have one
   await query(`
     UPDATE orders SET order_number = 'WS-' || LPAD(id::TEXT, 5, '0')
@@ -348,6 +352,7 @@ async function initSchema() {
   await query(`ALTER TABLE hataali_orders ADD COLUMN IF NOT EXISTS driver_id INT REFERENCES users(id)`);
   await query(`ALTER TABLE hataali_orders ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION`);
   await query(`ALTER TABLE hataali_orders ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION`);
+  await query(`ALTER TABLE hataali_orders ADD COLUMN IF NOT EXISTS delivery_otp TEXT`);
   // ── جدول خدمة وصّلني / وصّل لي ─────────────────────────────────────────────
   await query(`
     CREATE TABLE IF NOT EXISTS trips (
@@ -372,6 +377,9 @@ async function initSchema() {
   `);
   // Migration آمنة لو الجدول كان موجود من قبل من غير العمود ده
   await query(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS preferred_gender TEXT CHECK (preferred_gender IN ('male','female') OR preferred_gender IS NULL)`);
+  // كود تحقق بيتولد وقت قبول المندوب للرحلة، والراكب يقوله للمندوب وقت
+  // الصعود عشان يتأكد إنه المندوب الصح واقف قدام الراكب الصح.
+  await query(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS delivery_otp TEXT`);
   await query(`CREATE INDEX IF NOT EXISTS idx_trips_customer ON trips(customer_id)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_trips_driver  ON trips(driver_id)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_trips_status  ON trips(status)`);

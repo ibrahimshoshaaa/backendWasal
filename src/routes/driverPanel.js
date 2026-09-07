@@ -248,22 +248,26 @@ router.put('/location', requireAuth, requireRole('driver'), async (req, res) => 
 
 router.put('/orders/:id/accept', requireAuth, requireRole('driver'), async (req, res) => {
   try {
+    // كود تحقق مكوّن من 4 أرقام يتولد وقت الاستلام ويتبعت للعميل، والمندوب
+    // هيحتاجه يدخله وقت التسليم عشان يقفل الطلب.
+    const otp = String(Math.floor(1000 + Math.random() * 9000));
+
     const { rowCount, rows } = await query(
-      `UPDATE orders o SET status='picked_up', driver_id=$1, picked_up_at=now()
+      `UPDATE orders o SET status='picked_up', driver_id=$1, picked_up_at=now(), delivery_otp=$3
        FROM merchants m
        WHERE o.id=$2 AND o.status='ready' AND o.driver_id IS NULL
          AND m.id = o.merchant_id
          AND (m.linked_driver_ids IS NULL OR m.linked_driver_ids = '[]'::jsonb
               OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(m.linked_driver_ids,'[]'::jsonb)) t(d) WHERE t.d::int=$1))
        RETURNING o.*`,
-      [req.userId, req.params.id]
+      [req.userId, req.params.id, otp]
     );
     if (!rowCount) return res.status(404).json({ error: 'الطلب غير متاح' });
 
     const order = rows[0];
     notify(req, order.customer_id, {
       title: 'المندوب في الطريق 🛵',
-      body: `طلبك رقم ${order.order_number} مع المندوب وفي طريقه إليك`,
+      body: `طلبك رقم ${order.order_number} مع المندوب وفي طريقه إليك. كود التسليم: ${otp}`,
       type: 'order_picked_up',
       orderId: order.id,
     });
@@ -276,6 +280,18 @@ router.put('/orders/:id/accept', requireAuth, requireRole('driver'), async (req,
 
 router.put('/orders/:id/deliver', requireAuth, requireRole('driver'), async (req, res) => {
   try {
+    const otp = (req.body?.otp ?? '').toString().trim();
+    if (!otp) return res.status(400).json({ error: 'أدخل كود التسليم اللي مع العميل' });
+
+    const { rows: check } = await query(
+      `SELECT delivery_otp FROM orders WHERE id=$1 AND driver_id=$2 AND status='picked_up'`,
+      [req.params.id, req.userId]
+    );
+    if (!check.length) return res.status(404).json({ error: 'الطلب غير موجود' });
+    if (check[0].delivery_otp && check[0].delivery_otp !== otp) {
+      return res.status(400).json({ error: 'كود التسليم غير صحيح' });
+    }
+
     const { rowCount, rows } = await query(
       `UPDATE orders SET status='delivered', delivered_at=now()
        WHERE id=$1 AND driver_id=$2 AND status='picked_up' RETURNING *`,
@@ -294,6 +310,33 @@ router.put('/orders/:id/deliver', requireAuth, requireRole('driver'), async (req
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'فشل تأكيد التوصيل' });
+  }
+});
+
+// رسالة جاهزة من المندوب للعميل — بتتبعت كإشعار داخل التطبيق مش SMS حقيقي.
+router.post('/orders/:id/message', requireAuth, requireRole('driver'), async (req, res) => {
+  try {
+    const text = (req.body?.text ?? '').toString().trim();
+    if (!text) return res.status(400).json({ error: 'الرسالة فارغة' });
+    if (text.length > 200) return res.status(400).json({ error: 'الرسالة طويلة جداً' });
+
+    const { rows } = await query(
+      `SELECT id, order_number, customer_id FROM orders WHERE id=$1 AND driver_id=$2`,
+      [req.params.id, req.userId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'الطلب غير موجود' });
+
+    const order = rows[0];
+    notify(req, order.customer_id, {
+      title: `رسالة من المندوب — طلب ${order.order_number}`,
+      body: text,
+      type: 'driver_message',
+      orderId: order.id,
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'فشل إرسال الرسالة' });
   }
 });
 
