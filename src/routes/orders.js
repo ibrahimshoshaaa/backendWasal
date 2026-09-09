@@ -132,6 +132,7 @@ router.get('/:id/track', requireAuth, async (req, res) => {
       `SELECT o.id, o.status, o.order_number, o.customer_id,
               o.accepted_at, o.ready_at, o.picked_up_at, o.delivered_at,
               o.rating, o.driver_rating, o.driver_id, o.total, o.payment_method,
+              o.delivery_otp,
               u.driver_lat, u.driver_lng,
               u.full_name AS driver_name, u.phone AS driver_phone,
               m.name AS merchant_name, m.address AS merchant_address,

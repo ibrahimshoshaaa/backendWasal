@@ -228,12 +228,14 @@ router.put('/admin/:id', async (req, res) => {
       await query(`INSERT INTO notifications (user_id,title,body,type) VALUES ($1,$2,$3,'hataali')`,
         [order.customer_id, 'تمت الموافقة', `تمت الموافقة على طلبك "${order.title}" — رسوم التوصيل: ${order.delivery_fee} جنيه`]);
 
-      // إشعار كل المناديب المتصلين بوجود طلب هاتهالي جديد متاح للاستلام
+      // إشعار كل المناديب المتصلين بوجود طلب هاتهالي جديد متاح للاستلام —
+      // notifType مختلف عن orders ('new_hataali_order' مش 'new_available_order')
+      // عشان الـ id بتاع الجدولين مستقل ومحتمل يتطابق بالصدفة.
       notifyOnlineDrivers(
         {
           title: 'طلب هاتهالي جديد! 🛵',
           body: `طلب "${order.title}" في انتظار مندوب يستلمه`,
-          type: 'new_available_order',
+          type: 'new_hataali_order',
           orderId: order.id,
         },
         sendToUser
