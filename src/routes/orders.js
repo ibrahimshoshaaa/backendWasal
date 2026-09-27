@@ -1,5 +1,5 @@
 const express = require('express');
-const { query, createNotification } = require('../db');
+const { pool, query, createNotification } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { checkCancelRate, checkNewOrderSignals } = require('../services/fraud');
 const { isMerchantOpenNow } = require('../services/merchantHours');
@@ -9,67 +9,122 @@ const router = express.Router();
 // ─── Helper: notify via WebSocket + DB ────────────────────────────────────────
 function notify(req, userId, payload) {
   createNotification(userId, payload).catch(() => {});
-  req.app.locals.sendToUser?.(userId, { type: 'notification', ...payload });
+  req.app.locals.sendToUser?.(userId, { ...payload, notifType: payload.type, type: 'notification' });
 }
 
 // ─── POST /api/orders — العميل يطلب ───────────────────────────────────────────
 router.post('/', requireAuth, async (req, res) => {
-  const { merchant_id, address_id, items, subtotal, delivery_fee, total, payment_method, notes } =
-    req.body || {};
-  if (!merchant_id || !items || !items.length) {
-    return res.status(400).json({ error: 'بيانات الطلب ناقصة' });
+  const { merchant_id, address_id, payment_method, notes } = req.body || {};
+  if (!Number.isInteger(Number(merchant_id)) || !Number.isInteger(Number(address_id))) {
+    return res.status(400).json({ error: 'المتجر وعنوان التوصيل مطلوبان' });
   }
 
+  const fail = (status, message) => {
+    const error = new Error(message);
+    error.status = status;
+    throw error;
+  };
+  let client;
+  let order;
+  let merchantOwnerId;
+
   try {
-    // تحقق أن المتجر مفتوح فعلياً (يدوياً + حسب جدول أوقات العمل) قبل قبول الطلب
-    const { rows: merchantCheck } = await query('SELECT * FROM merchants WHERE id=$1', [merchant_id]);
-    if (!merchantCheck.length) return res.status(404).json({ error: 'المتجر غير موجود' });
-    const openStatus = isMerchantOpenNow(merchantCheck[0]);
-    if (!openStatus.open) {
-      return res.status(400).json({ error: 'المتجر مغلق حالياً، برجاء المحاولة لاحقاً' });
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    const { rows: addresses } = await client.query(
+      'SELECT id FROM addresses WHERE id=$1 AND user_id=$2',
+      [address_id, req.userId]
+    );
+    if (!addresses.length) fail(400, 'عنوان التوصيل غير موجود في حسابك');
+
+    const { rows: merchants } = await client.query(
+      'SELECT * FROM merchants WHERE id=$1', [merchant_id]
+    );
+    if (!merchants.length) fail(404, 'المتجر غير موجود');
+    const merchant = merchants[0];
+    if (!isMerchantOpenNow(merchant).open) fail(400, 'المتجر مغلق حالياً، برجاء المحاولة لاحقاً');
+
+    // Lock this customer's cart through checkout so it cannot change while
+    // the order is being priced and cleared. Never use client-supplied totals.
+    const { rows: cartLines } = await client.query(
+      `SELECT ci.id, ci.product_id, ci.quantity, ci.selected_options, ci.unit_extra,
+              p.name, p.price, p.image_url, p.merchant_id, p.is_available
+       FROM cart_items ci JOIN products p ON p.id=ci.product_id
+       WHERE ci.user_id=$1 ORDER BY ci.id FOR UPDATE OF ci`,
+      [req.userId]
+    );
+    if (!cartLines.length) fail(400, 'السلة فارغة');
+    if (cartLines.some(line => Number(line.merchant_id) !== Number(merchant_id))) {
+      fail(400, 'منتجات السلة لا تخص هذا المتجر');
+    }
+    if (cartLines.some(line => !line.is_available || !Number.isInteger(line.quantity) || line.quantity <= 0)) {
+      fail(400, 'أحد منتجات السلة غير متاح أو كميته غير صحيحة');
     }
 
-    // Generate order_number: WS-XXXXX
-    const { rows: seqRow } = await query(`SELECT NEXTVAL('orders_id_seq') AS next_id`);
+    const items = cartLines.map(line => {
+      const price = Number(line.price);
+      const extra = Number(line.unit_extra || 0);
+      if (!Number.isFinite(price) || !Number.isFinite(extra) || price < 0 || extra < 0) {
+        fail(400, 'سعر أحد المنتجات غير صحيح');
+      }
+      const unitPrice = price + extra;
+      return {
+        id: line.id,
+        product_id: line.product_id,
+        name: line.name,
+        price,
+        unit_extra: extra,
+        unit_price: unitPrice,
+        selected_options: line.selected_options || [],
+        quantity: line.quantity,
+        image_url: line.image_url,
+        line_total: unitPrice * line.quantity,
+      };
+    });
+    const subtotalCents = items.reduce((sum, item) =>
+      sum + Math.round(item.unit_price * 100) * item.quantity, 0);
+    const feeCents = Math.round(Number(merchant.delivery_fee) * 100);
+    if (!Number.isFinite(feeCents) || feeCents < 0) fail(400, 'رسوم التوصيل غير صحيحة');
+    const subtotal = subtotalCents / 100;
+    const deliveryFee = feeCents / 100;
+    const total = (subtotalCents + feeCents) / 100;
+    if (subtotal < Number(merchant.min_order || 0)) fail(400, 'لم تصل السلة للحد الأدنى للطلب');
+
+    const { rows: seqRow } = await client.query("SELECT NEXTVAL('orders_id_seq') AS next_id");
     const nextId = seqRow[0].next_id;
     const orderNumber = 'WS-' + String(nextId).padStart(5, '0');
-
-    const { rows } = await query(
+    const { rows } = await client.query(
       `INSERT INTO orders
         (id, order_number, customer_id, merchant_id, address_id, items_json,
          subtotal, delivery_fee, total, payment_method, notes)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [
-        nextId, orderNumber, req.userId, merchant_id,
-        address_id || null, JSON.stringify(items),
-        subtotal || 0, delivery_fee || 0, total || 0,
-        payment_method || 'cash', notes || null,
-      ]
+      [nextId, orderNumber, req.userId, merchant_id, address_id,
+       JSON.stringify(items), subtotal, deliveryFee, total,
+       payment_method || 'cash', notes || null]
     );
-    await query('DELETE FROM cart_items WHERE user_id=$1', [req.userId]);
-
-    const order = rows[0];
-
-    // Notify merchant via WS + DB
-    const { rows: merchantRows } = await query(
-      'SELECT owner_user_id FROM merchants WHERE id=$1', [merchant_id]
-    );
-    if (merchantRows.length) {
-      notify(req, merchantRows[0].owner_user_id, {
-        title: 'طلب جديد! 🛍️',
-        body: `طلب جديد رقم ${orderNumber}`,
-        type: 'new_order',
-        orderId: order.id,
-      });
-    }
-
-    checkNewOrderSignals(order).catch((e) => console.error('[fraud] check failed:', e.message));
-
-    res.json(order);
+    order = rows[0];
+    merchantOwnerId = merchant.owner_user_id;
+    await client.query('DELETE FROM cart_items WHERE user_id=$1 AND id=ANY($2)',
+      [req.userId, cartLines.map(line => line.id)]);
+    await client.query('COMMIT');
   } catch (err) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    if (err.status) return res.status(err.status).json({ error: err.message });
     console.error(err);
-    res.status(500).json({ error: 'فشل إنشاء الطلب' });
+    return res.status(500).json({ error: 'فشل إنشاء الطلب' });
+  } finally {
+    client?.release();
   }
+
+  notify(req, merchantOwnerId, {
+    title: 'طلب جديد! 🛍️',
+    body: `طلب جديد رقم ${order.order_number}`,
+    type: 'new_order',
+    orderId: order.id,
+  });
+  checkNewOrderSignals(order).catch((e) => console.error('[fraud] check failed:', e.message));
+  res.json(order);
 });
 
 // ─── GET /api/orders — طلبات العميل ──────────────────────────────────────────

@@ -457,9 +457,8 @@ async function notifyOnlineDrivers({ title, body, type, orderId, merchantId }, s
       if (linked.length) {
         params.push(JSON.stringify(linked.map(Number)));
         linkedFilter = ` AND EXISTS (
-          SELECT 1 FROM jsonb_array_elements_text(
-            (SELECT linked_driver_ids FROM merchants WHERE id=${merchantId})
-          ) AS t(did) WHERE t.did::int = users.id
+          SELECT 1 FROM jsonb_array_elements_text($1::jsonb) AS t(did)
+          WHERE t.did::int = users.id
         )`;
       }
     }

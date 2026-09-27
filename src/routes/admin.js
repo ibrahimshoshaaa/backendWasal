@@ -259,7 +259,7 @@ router.put('/orders/:id/status', async (req, res) => {
     if (msg) {
       // إشعار العميل
       createNotification(order.customer_id, { ...msg, orderId: order.id }).catch(() => {});
-      req.app.locals.sendToUser?.(order.customer_id, { type: 'notification', ...msg, orderId: order.id });
+      req.app.locals.sendToUser?.(order.customer_id, { ...msg, orderId: order.id, notifType: msg.type, type: 'notification' });
 
       // إشعار المتجر عند الإلغاء أو التسليم
       if ((status === 'cancelled' || status === 'delivered') && order.merchant_owner_id) {
@@ -267,7 +267,7 @@ router.put('/orders/:id/status', async (req, res) => {
           ? { title: 'تم إلغاء طلب ❌', body: `الطلب رقم ${order.order_number} ألغته الإدارة`, type: 'order_cancelled', orderId: order.id }
           : { title: 'تم تسليم الطلب ✅', body: `الطلب رقم ${order.order_number} وُصِّل بنجاح`, type: 'order_delivered', orderId: order.id };
         createNotification(order.merchant_owner_id, merchantMsg).catch(() => {});
-        req.app.locals.sendToUser?.(order.merchant_owner_id, { type: 'notification', ...merchantMsg });
+        req.app.locals.sendToUser?.(order.merchant_owner_id, { ...merchantMsg, notifType: merchantMsg.type, type: 'notification' });
       }
 
       // إشعار المندوب عند التعيين أو الإلغاء
@@ -671,12 +671,18 @@ router.put('/orders/:id/driver', async (req, res) => {
     const { driver_id } = req.body || {};
     if (!driver_id) return res.status(400).json({ error: 'driver_id مطلوب' });
 
+    const { rows: drivers } = await query(
+      "SELECT id FROM users WHERE id=$1 AND role='driver' AND driver_status='active'",
+      [driver_id]
+    );
+    if (!drivers.length) return res.status(400).json({ error: 'المندوب غير موجود أو غير مفعل' });
+
     const { rows } = await query(
-      `UPDATE orders SET driver_id=$1 WHERE id=$2
+      `UPDATE orders SET driver_id=$1 WHERE id=$2 AND status='ready' AND driver_id IS NULL
        RETURNING id, order_number, status, customer_id, merchant_id`,
       [driver_id, req.params.id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'الطلب غير موجود' });
+    if (!rows.length) return res.status(409).json({ error: 'الطلب غير جاهز أو تم تعيينه لمندوب بالفعل' });
 
     const order = rows[0];
     const { createNotification } = require('../db');
