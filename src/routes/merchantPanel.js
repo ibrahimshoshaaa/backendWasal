@@ -13,7 +13,7 @@ async function myMerchantId(userId) {
 
 function notify(req, userId, payload) {
   createNotification(userId, payload).catch(() => {});
-  req.app.locals.sendToUser?.(userId, { type: 'notification', ...payload });
+  req.app.locals.sendToUser?.(userId, { ...payload, notifType: payload.type, type: 'notification' });
 }
 
 // Helper: safe-delete على Cloudinary. بيقبل public_id مباشرة أو رابط،

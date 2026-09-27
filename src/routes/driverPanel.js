@@ -6,7 +6,7 @@ const router = express.Router();
 
 function notify(req, userId, payload) {
   createNotification(userId, payload).catch(() => {});
-  req.app.locals.sendToUser?.(userId, { type: 'notification', ...payload });
+  req.app.locals.sendToUser?.(userId, { ...payload, notifType: payload.type, type: 'notification' });
 }
 
 router.get('/orders', requireAuth, requireRole('driver'), async (req, res) => {
@@ -33,7 +33,7 @@ router.get('/orders', requireAuth, requireRole('driver'), async (req, res) => {
              OR m.linked_driver_ids @> to_jsonb($1::int)
              OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(m.linked_driver_ids,'[]'::jsonb)) t(d) WHERE t.d::int=$1)
            ))
-          OR (o.driver_id=$1 AND o.status='picked_up')
+          OR (o.driver_id=$1 AND o.status IN ('ready','picked_up'))
        )
        ORDER BY o.created_at DESC`,
       [req.userId]
@@ -255,10 +255,12 @@ router.put('/orders/:id/accept', requireAuth, requireRole('driver'), async (req,
     const { rowCount, rows } = await query(
       `UPDATE orders o SET status='picked_up', driver_id=$1, picked_up_at=now(), delivery_otp=$3
        FROM merchants m
-       WHERE o.id=$2 AND o.status='ready' AND o.driver_id IS NULL
+       WHERE o.id=$2 AND o.status='ready'
          AND m.id = o.merchant_id
-         AND (m.linked_driver_ids IS NULL OR m.linked_driver_ids = '[]'::jsonb
-              OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(m.linked_driver_ids,'[]'::jsonb)) t(d) WHERE t.d::int=$1))
+         AND (o.driver_id=$1 OR
+              (o.driver_id IS NULL AND
+               (m.linked_driver_ids IS NULL OR m.linked_driver_ids = '[]'::jsonb
+                OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(m.linked_driver_ids,'[]'::jsonb)) t(d) WHERE t.d::int=$1))))
        RETURNING o.*`,
       [req.userId, req.params.id, otp]
     );
