@@ -43,11 +43,14 @@ test('checkout pricing, address ownership, notifications, and manual assignment'
     env: { ...process.env, PORT: String(port) },
     stdio: 'pipe',
   });
+  let serverOutput = '';
+  server.stdout.on('data', chunk => { serverOutput += chunk; });
+  server.stderr.on('data', chunk => { serverOutput += chunk; });
   const sockets = [];
   try {
     await waitFor(async () => {
       try { return (await request('/health')).status === 200; } catch { return false; }
-    });
+    }).catch(error => { throw new Error(`${error.message}\n${serverOutput}`); });
     const insertUser = async (role) => (await query(
       `INSERT INTO users(full_name,email,password_hash,role,driver_status,is_online)
        VALUES($1,$2,'test', $3,'active',true) RETURNING id,role`,
