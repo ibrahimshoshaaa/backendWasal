@@ -1,0 +1,35 @@
+name: Backend integration tests
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wasal
+          POSTGRES_PASSWORD: test-password
+          POSTGRES_DB: wasal_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wasal"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://wasal:test-password@127.0.0.1:5432/wasal_test
+      JWT_SECRET: integration-test-only-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: node --check src/routes/orders.js
+      - run: node --test tests/order-flow.test.js
