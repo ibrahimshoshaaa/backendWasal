@@ -1,8 +1,14 @@
 const express = require('express');
-const { query } = require('../db');
+const { query, pool } = require('../db');
+const { resolveOptions } = require('../services/options');
 const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
+for (const method of ['get', 'post', 'put', 'delete']) {
+  const register = router[method].bind(router);
+  router[method] = (path, ...handlers) => register(path, ...handlers.map(handler =>
+    (req, res, next) => Promise.resolve().then(() => handler(req, res, next)).catch(next)));
+}
 // Fallback فقط لو المتجر مالوش delivery_fee متسجل لأي سبب — القيمة الحقيقية
 // بتتجاب من جدول merchants لكل تاجر على حدة.
 const DEFAULT_DELIVERY_FEE = 15;
@@ -66,70 +72,39 @@ router.get('/', requireAuth, async (req, res) => {
 // كل تركيبة إضافات مختلفة بتتخزن كسطر منفصل في السلة (options_hash مميز)،
 // عشان مثلاً "بيتزا وسط" و"بيتزا كبيرة" ما يتلخبطوش في نفس السطر.
 router.post('/', requireAuth, async (req, res) => {
-  const { product_id, quantity, selected_options } = req.body || {};
-  if (!product_id || !quantity) return res.status(400).json({ error: 'بيانات ناقصة' });
-
+  const { product_id, quantity, selected_options = [] } = req.body || {};
+  if (!Number.isInteger(Number(product_id)) || !Number.isInteger(quantity) || quantity < 1 || quantity > 99) return res.status(400).json({ error: 'المنتج والكمية غير صحيحين' });
+  const client = await pool.connect();
   try {
-    const { rows: productRows } = await query('SELECT * FROM products WHERE id=$1', [product_id]);
-    if (!productRows.length) return res.status(404).json({ error: 'المنتج غير موجود' });
-    const product = productRows[0];
-
-    // Cart holds items from a single merchant at a time — switching
-    // merchants replaces the cart, matching the app's single-checkout flow.
-    const { rows: existingCart } = await query(
-      `SELECT DISTINCT p.merchant_id FROM cart_items ci
-       JOIN products p ON p.id = ci.product_id WHERE ci.user_id=$1`,
-      [req.userId]
-    );
-    if (existingCart.length && existingCart[0].merchant_id !== product.merchant_id) {
-      await query('DELETE FROM cart_items WHERE user_id=$1', [req.userId]);
-    }
-
-    // نتحقق من الاختيارات المرسلة إنها فعلاً تابعة لنفس المنتج، ونحسب السعر الإضافي
-    let resolvedOptions = [];
-    let unitExtra = 0;
-    const choiceIds = Array.isArray(selected_options)
-      ? selected_options.flatMap((o) => o.choice_ids || [])
-      : [];
-    if (choiceIds.length) {
-      const { rows: choiceRows } = await query(
-        `SELECT c.id, c.name, c.extra_price, c.group_id, g.name AS group_name
-         FROM option_choices c JOIN option_groups g ON g.id=c.group_id
-         WHERE c.id = ANY($1) AND g.product_id=$2 AND c.is_available=true`,
-        [choiceIds, product_id]
-      );
-      resolvedOptions = choiceRows.map((r) => ({
-        choice_id: r.id,
-        name: r.name,
-        group_id: r.group_id,
-        group_name: r.group_name,
-        extra_price: Number(r.extra_price),
-      }));
-      unitExtra = resolvedOptions.reduce((s, o) => s + o.extra_price, 0);
-    }
-    const optionsHash = resolvedOptions.length
-      ? resolvedOptions.map((o) => o.choice_id).sort((a, b) => a - b).join('-')
-      : '';
-
-    await query(
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1)', [req.userId]);
+    const { rows } = await client.query('SELECT * FROM products WHERE id=$1', [product_id]);
+    const product = rows[0];
+    if (!product || !product.is_available) throw Object.assign(new Error('المنتج غير متاح'), { status: 400 });
+    const options = await resolveOptions(client.query.bind(client), product.id, selected_options);
+    const { rows: existing } = await client.query(
+      `SELECT DISTINCT p.merchant_id FROM cart_items ci JOIN products p ON p.id=ci.product_id WHERE ci.user_id=$1`, [req.userId]);
+    if (existing.some(line => line.merchant_id !== product.merchant_id)) await client.query('DELETE FROM cart_items WHERE user_id=$1', [req.userId]);
+    const result = await client.query(
       `INSERT INTO cart_items (user_id, product_id, quantity, selected_options, options_hash, unit_extra)
        VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (user_id, product_id, options_hash)
-       DO UPDATE SET quantity = cart_items.quantity + $3`,
-      [req.userId, product_id, quantity, JSON.stringify(resolvedOptions), optionsHash, unitExtra]
-    );
-
+       ON CONFLICT (user_id, product_id, options_hash) DO UPDATE
+       SET quantity=cart_items.quantity+$3, selected_options=$4, unit_extra=$6
+       WHERE cart_items.quantity+$3 <= 99 RETURNING id`,
+      [req.userId, product.id, quantity, JSON.stringify(options.resolved), options.hash, options.extra]);
+    if (!result.rowCount) throw Object.assign(new Error('الحد الأقصى للكمية 99'), { status: 400 });
+    await client.query('COMMIT');
     res.json(await buildCartResponse(req.userId));
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'فشلت إضافة المنتج للسلة' });
-  }
+    await client.query('ROLLBACK');
+    res.status(err.status || 500).json({ error: err.status ? err.message : 'فشلت إضافة المنتج للسلة' });
+  } finally { client.release(); }
 });
 
 // PUT /api/cart/item/:productId — تحديث الكمية لسطر بدون إضافات (توافق مع النسخ القديمة)
 router.put('/item/:productId', requireAuth, async (req, res) => {
   const { quantity } = req.body || {};
-  if (quantity === undefined) return res.status(400).json({ error: 'الكمية مطلوبة' });
+  if (!Number.isInteger(quantity) || quantity < 0 || quantity > 99) return res.status(400).json({ error: 'الكمية لازم تكون من 0 إلى 99' });
 
   if (quantity <= 0) {
     await query("DELETE FROM cart_items WHERE user_id=$1 AND product_id=$2 AND options_hash=''", [
@@ -148,7 +123,7 @@ router.put('/item/:productId', requireAuth, async (req, res) => {
 // PUT /api/cart/line/:id — تحديث الكمية لسطر معين (بما فيه أسطر بإضافات مختارة)
 router.put('/line/:id', requireAuth, async (req, res) => {
   const { quantity } = req.body || {};
-  if (quantity === undefined) return res.status(400).json({ error: 'الكمية مطلوبة' });
+  if (!Number.isInteger(quantity) || quantity < 0 || quantity > 99) return res.status(400).json({ error: 'الكمية لازم تكون من 0 إلى 99' });
 
   if (quantity <= 0) {
     await query('DELETE FROM cart_items WHERE id=$1 AND user_id=$2', [req.params.id, req.userId]);
@@ -174,3 +149,4 @@ router.delete('/', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+

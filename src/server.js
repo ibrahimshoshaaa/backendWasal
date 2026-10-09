@@ -30,6 +30,16 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json());
+function staffSafe(value) {
+  if (Array.isArray(value)) return value.map(staffSafe);
+  if (!value || typeof value !== 'object' || value instanceof Date) return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'delivery_otp').map(([key, v]) => [key, staffSafe(v)]));
+}
+app.use((req, res, next) => {
+  const json = res.json.bind(res);
+  res.json = value => json(['driver', 'merchant'].includes(req.userRole) ? staffSafe(value) : value);
+  next();
+});
 
 // ملاحظة: تم حذف app.use('/uploads', express.static(...))
 // كل الصور الجديدة بترفع لـ Cloudinary وبتترجع بروابط secure_url كاملة،
@@ -39,6 +49,9 @@ app.use(express.json());
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
+const deliveryLimiter = require('express-rate-limit')({ windowMs: 15 * 60 * 1000, max: 30,
+  standardHeaders: true, legacyHeaders: false, message: { error: 'محاولات كود كتير، حاول لاحقاً' } });
+app.use(['/api/driver/orders/:id/deliver', '/api/hataali/:id/deliver', '/api/trips/:id/pickup'], requireAuth, deliveryLimiter);
 app.use('/api/auth', authRoutes);
 app.use('/api/categories', categoriesRoutes);
 app.use('/api/merchants', merchantsRoutes);
@@ -59,7 +72,7 @@ app.use('/api/trips',   requireAuth, tripsRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err);
-  res.status(400).json({ error: err.message || 'حدث خطأ غير متوقع' });
+  res.status(err.status || 500).json({ error: err.status ? err.message : 'حدث خطأ غير متوقع' });
 });
 
 // ─── WebSocket server ──────────────────────────────────────────────────────────
@@ -91,15 +104,24 @@ function sendToUser(userId, event) {
 wss.on('connection', (ws, req) => {
   // Client authenticates by sending: { type: 'auth', token: '...' }
   let userId = null;
+  let expiryTimer;
+  const authTimer = setTimeout(() => { if (!userId) ws.close(1008, 'Authentication required'); }, 10000);
 
-  ws.on('message', (raw) => {
+  ws.on('message', async (raw) => {
     try {
       const msg = JSON.parse(raw);
       if (msg.type === 'auth') {
-        const payload = verifyToken(msg.token);
+        const payload = await verifyToken(msg.token);
         if (!payload) { ws.close(); return; }
+        if (userId) removeClient(userId, ws);
         userId = String(payload.id);
         registerClient(userId, ws);
+        clearTimeout(authTimer);
+        clearInterval(expiryTimer);
+        // Recheck long-lived sockets as well as HTTP requests.
+        expiryTimer = setInterval(async () => {
+          try { if (!await verifyToken(msg.token)) ws.close(1008, 'Session revoked'); } catch (_) { ws.close(1011); }
+        }, 60000);
         ws.send(JSON.stringify({ type: 'auth_ok' }));
       }
     } catch (err) {
@@ -108,12 +130,18 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    clearTimeout(authTimer);
+    clearInterval(expiryTimer);
     if (userId) removeClient(userId, ws);
   });
 });
 
 // Attach sendToUser globally so routes can use it
 app.locals.sendToUser = sendToUser;
+app.locals.disconnectUser = userId => {
+  for (const ws of clients.get(String(userId)) || []) ws.close(1008, 'Session revoked');
+  clients.delete(String(userId));
+};
 
 const PORT = process.env.PORT || 3000;
 
@@ -125,3 +153,4 @@ initSchema()
     console.error('Failed to initialize database:', err);
     process.exit(1);
   });
+

@@ -99,14 +99,19 @@ router.get('/stats', requireAuth, requireRole('driver'), async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT
-         COUNT(*) FILTER (WHERE delivered_at::date = CURRENT_DATE) AS today_count,
-         COALESCE(SUM(delivery_fee) FILTER (WHERE delivered_at::date = CURRENT_DATE), 0) AS today_earnings,
+         COUNT(*) FILTER (WHERE (delivered_at AT TIME ZONE 'Africa/Cairo')::date = (now() AT TIME ZONE 'Africa/Cairo')::date) AS today_count,
+         COALESCE(SUM(delivery_fee) FILTER (WHERE (delivered_at AT TIME ZONE 'Africa/Cairo')::date = (now() AT TIME ZONE 'Africa/Cairo')::date), 0) AS today_earnings,
          COUNT(*) FILTER (WHERE delivered_at >= now() - interval '7 days') AS week_count,
          COALESCE(SUM(delivery_fee) FILTER (WHERE delivered_at >= now() - interval '7 days'), 0) AS week_earnings,
          COUNT(*) AS total_count,
          COALESCE(SUM(delivery_fee), 0) AS total_earnings
-       FROM orders
-       WHERE driver_id=$1 AND status='delivered'`,
+       FROM (
+         SELECT delivered_at, delivery_fee FROM orders WHERE driver_id=$1 AND status='delivered'
+         UNION ALL
+         SELECT updated_at AS delivered_at, delivery_fee FROM hataali_orders WHERE driver_id=$1 AND status='delivered'
+         UNION ALL
+         SELECT updated_at AS delivered_at, price AS delivery_fee FROM trips WHERE driver_id=$1 AND status='delivered'
+       ) deliveries`,
       [req.userId]
     );
     const r = rows[0];
@@ -211,7 +216,7 @@ router.put('/status', requireAuth, requireRole('driver'), async (req, res) => {
 router.put('/location', requireAuth, requireRole('driver'), async (req, res) => {
   try {
     const { lat, lng } = req.body || {};
-    if (lat === undefined || lng === undefined) {
+    if (typeof lat !== 'number' || typeof lng !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
       return res.status(400).json({ error: 'الإحداثيات مطلوبة' });
     }
     await query('UPDATE users SET driver_lat=$1, driver_lng=$2 WHERE id=$3', [lat, lng, req.userId]);
@@ -219,27 +224,14 @@ router.put('/location', requireAuth, requireRole('driver'), async (req, res) => 
     // Push live location to the customer of any active job — سواء كان
     // طلب من متجر (orders) أو طلب هاتهالي (hataali_orders).
     const sendToUser = req.app.locals.sendToUser;
-    const { rows: activeOrders } = await query(
-      `SELECT customer_id FROM orders WHERE driver_id=$1 AND status='picked_up' LIMIT 1`,
-      [req.userId]
-    );
-    if (activeOrders.length) {
-      sendToUser?.(activeOrders[0].customer_id, { type: 'driver_location', lat, lng });
-    }
-    const { rows: activeHataali } = await query(
-      `SELECT customer_id FROM hataali_orders WHERE driver_id=$1 AND status='picked_up' LIMIT 1`,
-      [req.userId]
-    );
-    if (activeHataali.length) {
-      sendToUser?.(activeHataali[0].customer_id, { type: 'driver_location', lat, lng });
-    }
-    const { rows: activeTrips } = await query(
-      `SELECT customer_id FROM trips WHERE driver_id=$1 AND status='picked_up' LIMIT 1`,
-      [req.userId]
-    );
-    if (activeTrips.length) {
-      sendToUser?.(activeTrips[0].customer_id, { type: 'driver_location', lat, lng });
-    }
+    const { rows: jobs } = await query(
+      `SELECT id, customer_id, 'store' AS service FROM orders WHERE driver_id=$1 AND status='picked_up'
+       UNION ALL SELECT id, customer_id, 'hataali' AS service FROM hataali_orders WHERE driver_id=$1 AND status='picked_up'
+       UNION ALL SELECT id, customer_id, 'trip' AS service FROM trips WHERE driver_id=$1 AND status IN ('accepted','picked_up')`,
+      [req.userId]);
+    for (const job of jobs) sendToUser?.(job.customer_id, {
+      type: 'driver_location', lat, lng, service: job.service, orderId: job.id, driverId: req.userId,
+    });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'فشل تحديث الموقع' });
@@ -250,7 +242,7 @@ router.put('/orders/:id/accept', requireAuth, requireRole('driver'), async (req,
   try {
     // كود تحقق مكوّن من 4 أرقام يتولد وقت الاستلام ويتبعت للعميل، والمندوب
     // هيحتاجه يدخله وقت التسليم عشان يقفل الطلب.
-    const otp = String(Math.floor(1000 + Math.random() * 9000));
+    const otp = String(require('crypto').randomInt(1000, 10000));
 
     const { rowCount, rows } = await query(
       `UPDATE orders o SET status='picked_up', driver_id=$1, picked_up_at=now(), delivery_otp=$3
@@ -290,7 +282,7 @@ router.put('/orders/:id/deliver', requireAuth, requireRole('driver'), async (req
       [req.params.id, req.userId]
     );
     if (!check.length) return res.status(404).json({ error: 'الطلب غير موجود' });
-    if (check[0].delivery_otp && check[0].delivery_otp !== otp) {
+    if (!check[0].delivery_otp || check[0].delivery_otp !== otp) {
       return res.status(400).json({ error: 'كود التسليم غير صحيح' });
     }
 
@@ -343,3 +335,4 @@ router.post('/orders/:id/message', requireAuth, requireRole('driver'), async (re
 });
 
 module.exports = router;
+

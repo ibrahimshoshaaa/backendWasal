@@ -9,10 +9,11 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const { query } = require('../db');
-const { signToken } = require('../middleware/auth');
+const { signToken, requireAuth, JWT_SECRET } = require('../middleware/auth');
+const { createHmac, randomInt } = require('crypto');
 const { upload, multerErrorHandler } = require('../middleware/uploader');
 const { uploadBuffer } = require('../config/cloudinary');
-const { generateVerificationCode, sendVerificationEmail } = require('../services/email');
+const { generateVerificationCode, sendVerificationEmail, sendPasswordResetEmail } = require('../services/email');
 
 const router = express.Router();
 
@@ -226,6 +227,7 @@ router.post('/verify-email', verifyLimiter, async (req, res) => {
     let user = rows[0];
     if (!user) return res.status(404).json({ error: 'الحساب مش موجود' });
 
+    if (user.email_verified) return res.status(400).json({ error: 'البريد مفعّل بالفعل، استخدم تسجيل الدخول' });
     if (!user.email_verified) {
       if (!user.email_verify_code || user.email_verify_code !== String(code).trim()) {
         return res.status(400).json({ error: 'الكود غير صحيح' });
@@ -376,7 +378,63 @@ router.post('/login', loginLimiter, async (req, res) => {
   }
 });
 
+router.get('/me', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await query('SELECT * FROM users WHERE id=$1', [req.userId]);
+    res.json({ user: publicUser(rows[0]) });
+  } catch (err) { res.status(500).json({ error: 'تعذر تحميل الحساب' }); }
+});
+
+const resetLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10,
+  standardHeaders: true, legacyHeaders: false, message: { error: 'محاولات كتير، حاول لاحقاً' } });
+const resetHash = (email, code) => createHmac('sha256', JWT_SECRET).update(`reset:${email}:${code}`).digest('hex');
+router.post('/forgot-password', resetLimiter, async (req, res) => {
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim() : '';
+  if (!email) return res.status(400).json({ error: 'البريد الإلكتروني مطلوب' });
+  try {
+    const code = String(randomInt(100000, 1000000));
+    const hash = resetHash(email, code);
+    const { rows } = await query(
+      `UPDATE users SET reset_code_hash=$2, reset_code_expires=now()+interval '15 minutes',
+         reset_code_sent_at=now(), reset_code_attempts=0
+       WHERE email=$1 AND (reset_code_sent_at IS NULL OR reset_code_sent_at < now()-interval '5 minutes') RETURNING id`,
+      [email, hash]);
+    if (rows.length) {
+      const result = await sendPasswordResetEmail(email, code);
+      if (!result.sent) {
+        await query('UPDATE users SET reset_code_hash=NULL, reset_code_sent_at=NULL WHERE id=$1 AND reset_code_hash=$2', [rows[0].id, hash]);
+        return res.status(503).json({ error: 'تعذر إرسال البريد، حاول لاحقاً' });
+      }
+    }
+    res.json({ ok: true, message: 'لو البريد مسجّل، هيصلك كود استعادة. انتظر 5 دقائق قبل إعادة الإرسال.' });
+  } catch (err) { res.status(500).json({ error: 'تعذر استعادة كلمة المرور' }); }
+});
+router.post('/reset-password', resetLimiter, async (req, res) => {
+  const { email, code, password } = req.body || {};
+  if (typeof email !== 'string' || typeof code !== 'string' || !/^\d{6}$/.test(code) ||
+      typeof password !== 'string' || password.length < 8 || Buffer.byteLength(password) > 72)
+    return res.status(400).json({ error: 'أدخل البريد والكود وكلمة مرور من 8 أحرف على الأقل (72 بايت كحد أقصى)' });
+  try {
+    const trimmed = email.trim();
+    const hash = resetHash(trimmed, code);
+    const passwordHash = await bcrypt.hash(password, 10);
+    const { rows } = await query(
+      `UPDATE users SET password_hash=$3, token_version=token_version+1,
+         reset_code_hash=NULL, reset_code_expires=NULL, reset_code_attempts=0
+       WHERE email=$1 AND reset_code_hash=$2 AND reset_code_expires>now() AND reset_code_attempts<5 RETURNING id`,
+      [trimmed, hash, passwordHash]);
+    if (!rows.length) {
+      await query(`UPDATE users SET reset_code_attempts=reset_code_attempts+1 WHERE email=$1 AND reset_code_hash IS NOT NULL AND reset_code_expires>now()`, [trimmed]);
+      return res.status(400).json({ error: 'الكود غير صحيح أو انتهت صلاحيته' });
+    }
+    await query('DELETE FROM device_tokens WHERE user_id=$1', [rows[0].id]);
+    req.app.locals.disconnectUser?.(rows[0].id);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'تعذر تغيير كلمة المرور' }); }
+});
+
 // أخطاء multer (حجم الملف / نوع الملف) بترجع رسائل واضحة بالعربي.
 router.use(multerErrorHandler);
 
 module.exports = { router, publicUser };
+

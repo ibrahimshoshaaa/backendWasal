@@ -52,8 +52,8 @@ test('checkout pricing, address ownership, notifications, and manual assignment'
       try { return (await request('/health')).status === 200; } catch { return false; }
     }).catch(error => { throw new Error(`${error.message}\n${serverOutput}`); });
     const insertUser = async (role) => (await query(
-      `INSERT INTO users(full_name,email,password_hash,role,driver_status,is_online)
-       VALUES($1,$2,'test', $3,'active',true) RETURNING id,role`,
+      `INSERT INTO users(full_name,email,password_hash,role,driver_status,is_online,email_verified)
+       VALUES($1,$2,'test', $3,'active',true,true) RETURNING id,role`,
       [role, `${role}-${unique}-${Math.random()}@example.test`, role]
     )).rows[0];
     const customer = await insertUser('customer');
@@ -74,8 +74,10 @@ test('checkout pricing, address ownership, notifications, and manual assignment'
     const { rows: [foreignAddress] } = await query(
       `INSERT INTO addresses(user_id,label,address_text) VALUES($1,'Other','Street') RETURNING id`, [other.id]
     );
-    await query('INSERT INTO cart_items(user_id,product_id,quantity,unit_extra) VALUES($1,$2,2,5)',
-      [customer.id, product.id]);
+    const { rows: [group] } = await query("INSERT INTO option_groups(product_id,name) VALUES($1,'Extra') RETURNING id", [product.id]);
+    const { rows: [choice] } = await query("INSERT INTO option_choices(group_id,name,extra_price) VALUES($1,'Cheese',5) RETURNING id", [group.id]);
+    await query('INSERT INTO cart_items(user_id,product_id,quantity,unit_extra,selected_options) VALUES($1,$2,2,5,$3)',
+      [customer.id, product.id, JSON.stringify([{group_id:group.id,choice_id:choice.id}])]);
     const merchantSocket = await socketFor(merchantUser); sockets.push(merchantSocket.ws);
     const driverSocket = await socketFor(driver); sockets.push(driverSocket.ws);
     const customerSocket = await socketFor(customer); sockets.push(customerSocket.ws);
@@ -115,3 +117,4 @@ test('checkout pricing, address ownership, notifications, and manual assignment'
     await pool.end();
   }
 });
+
