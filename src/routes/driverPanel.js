@@ -219,7 +219,16 @@ router.put('/location', requireAuth, requireRole('driver'), async (req, res) => 
     if (typeof lat !== 'number' || typeof lng !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
       return res.status(400).json({ error: 'الإحداثيات مطلوبة' });
     }
-    await query('UPDATE users SET driver_lat=$1, driver_lng=$2 WHERE id=$3', [lat, lng, req.userId]);
+    const now = Date.now();
+    const recordedAt = req.body.recorded_at == null ? new Date(now) : new Date(req.body.recorded_at);
+    if (!Number.isFinite(recordedAt.getTime()) || recordedAt.getTime() > now + 60000 || recordedAt.getTime() < now - 86400000) {
+      return res.status(400).json({error: 'وقت تحديث الموقع غير صحيح'});
+    }
+    const {rows: locations} = await query(
+      `UPDATE users SET driver_lat=$1, driver_lng=$2, driver_location_updated_at=$4
+       WHERE id=$3 AND (driver_location_updated_at IS NULL OR driver_location_updated_at <= $4)
+       RETURNING driver_location_updated_at`, [lat, lng, req.userId, new Date(Math.min(recordedAt.getTime(), now))]);
+    if (!locations.length) return res.json({ok: true, ignored: true});
 
     // Push live location to the customer of any active job — سواء كان
     // طلب من متجر (orders) أو طلب هاتهالي (hataali_orders).
@@ -230,7 +239,7 @@ router.put('/location', requireAuth, requireRole('driver'), async (req, res) => 
        UNION ALL SELECT id, customer_id, 'trip' AS service FROM trips WHERE driver_id=$1 AND status IN ('accepted','picked_up')`,
       [req.userId]);
     for (const job of jobs) sendToUser?.(job.customer_id, {
-      type: 'driver_location', lat, lng, service: job.service, orderId: job.id, driverId: req.userId,
+      type: 'driver_location', lat, lng, updatedAt: locations[0].driver_location_updated_at, service: job.service, orderId: job.id, driverId: req.userId,
     });
     res.json({ ok: true });
   } catch (err) {

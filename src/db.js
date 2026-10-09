@@ -38,6 +38,17 @@ async function initSchema() {
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_sent_at TIMESTAMPTZ`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_attempts INT NOT NULL DEFAULT 0`);
 
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS driver_location_updated_at TIMESTAMPTZ`);
+  await query(`CREATE TABLE IF NOT EXISTS order_submissions (
+    user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    service TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    response JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(user_id, service, request_key)
+  )`);
+
   // ── أعمدة public_id لصور المستخدمين — Migration آمنة (IF NOT EXISTS) ─────────
   // بنحفظ public_id جنب كل رابط عشان نقدر نحذف الصورة القديمة من Cloudinary
   // لما المستخدم يستبدلها. الأعمدة اختيارية (nullable) ومش بتكسر أي endpoint قديم.

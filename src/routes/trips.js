@@ -1,14 +1,9 @@
 const express = require('express');
-const { query, createNotification } = require('../db');
+const { pool, query, createNotification } = require('../db');
+const { beginSubmission, completeSubmission } = require('../services/submissions');
 const router = express.Router();
 
 // ─── helpers ────────────────────────────────────────────────────────────────────
-async function getPrice(type) {
-  const key = type === 'wassalni' ? 'wassalni_price' : 'wassal_li_price';
-  const { rows } = await query(`SELECT value FROM app_settings WHERE key=$1`, [key]);
-  return parseFloat(rows[0]?.value || '50');
-}
-
 // إشعار via WebSocket (لو المستخدم متصل دلوقتي) + DB + FCM push حقيقي
 // (نفس نمط notify() في orders.js) — ده اللي كان ناقص هنا واستبدلناه بدل
 // الـ INSERT المباشر اللي مكنش بيبعت push فعلي.
@@ -41,6 +36,8 @@ router.get('/settings', async (req, res) => {
 
 // POST /api/trips — طلب جديد (wassalni أو wassal_li)
 router.post('/', async (req, res) => {
+  let client;
+  let created;
   try {
     const {
       type, pickup_address, pickup_lat, pickup_lng,
@@ -53,9 +50,18 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'عنوان الانطلاق والوجهة مطلوبان' });
     const finalGender = ['male', 'female'].includes(preferred_gender) ? preferred_gender : null;
 
-    const price = await getPrice(type);
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const submission = await beginSubmission(client, req, 'trip');
+    if (submission?.response) {
+      await client.query('COMMIT');
+      return res.json(submission.response);
+    }
 
-    const { rows } = await query(
+    const { rows: prices } = await client.query('SELECT value FROM app_settings WHERE key=$1', [type === 'wassalni' ? 'wassalni_price' : 'wassal_li_price']);
+    const price = parseFloat(prices[0]?.value || '50');
+
+    const { rows } = await client.query(
       `INSERT INTO trips
          (customer_id, type, pickup_address, pickup_lat, pickup_lng,
           dropoff_address, dropoff_lat, dropoff_lng, notes, price, preferred_gender)
@@ -64,6 +70,12 @@ router.post('/', async (req, res) => {
        dropoff_address, dropoff_lat || null, dropoff_lng || null,
        notes || null, price, finalGender]
     );
+
+    created = rows[0];
+    await completeSubmission(client, submission, created);
+    await client.query('COMMIT');
+    client.release();
+    client = null;
 
     const label = type === 'wassalni' ? 'وصّلني' : 'وصّل لي';
     const genderNote = finalGender ? (finalGender === 'male' ? ' (سائق)' : ' (سائقة)') : '';
@@ -93,9 +105,12 @@ router.post('/', async (req, res) => {
 
     res.json(rows[0]);
   } catch (err) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    if (created) { console.error('Post-commit notification failed:', err); return res.json(created); }
+    if (err.status) return res.status(err.status).json({error: err.message});
     console.error('POST /trips error:', err);
     res.status(500).json({ error: 'تعذر إرسال الطلب' });
-  }
+  } finally { client?.release(); }
 });
 
 // GET /api/trips/my — طلبات العميل
@@ -103,7 +118,7 @@ router.get('/my', async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT t.*, d.full_name AS driver_name, d.phone AS driver_phone,
-              d.driver_lat, d.driver_lng
+              d.driver_lat, d.driver_lng, d.driver_location_updated_at
        FROM trips t
        LEFT JOIN users d ON d.id = t.driver_id
        WHERE t.customer_id = $1
@@ -124,7 +139,7 @@ router.get('/:id', async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT t.*, d.full_name AS driver_name, d.phone AS driver_phone,
-              d.driver_lat, d.driver_lng
+              d.driver_lat, d.driver_lng, d.driver_location_updated_at
        FROM trips t
        LEFT JOIN users d ON d.id = t.driver_id
        WHERE t.id = $1`,

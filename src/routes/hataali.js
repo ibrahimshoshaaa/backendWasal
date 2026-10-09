@@ -1,20 +1,31 @@
 const express = require('express');
-const { query, notifyOnlineDrivers, createNotification } = require('../db');
+const { pool, query, notifyOnlineDrivers, createNotification } = require('../db');
+const { beginSubmission, completeSubmission } = require('../services/submissions');
 const router = express.Router();
 
 // ─── Customer ─────────────────────────────────────────────────────────────────
 
 // POST /api/hataali — العميل يرسل طلب جديد
 router.post('/', async (req, res) => {
+  let client;
+  let created;
   try {
     const { title, description, approx_price, source, delivery_address, phone, lat, lng } = req.body || {};
     if (!title) return res.status(400).json({ error: 'اسم الطلب مطلوب' });
 
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const submission = await beginSubmission(client, req, 'hataali');
+    if (submission?.response) {
+      await client.query('COMMIT');
+      return res.json(submission.response);
+    }
+
     // جلب رسوم التوصيل من الإعدادات
-    const { rows: feeRows } = await query(`SELECT value FROM app_settings WHERE key='hataali_fee'`);
+    const { rows: feeRows } = await client.query(`SELECT value FROM app_settings WHERE key='hataali_fee'`);
     const fee = parseFloat(feeRows[0]?.value || '35');
 
-    const { rows } = await query(
+    const { rows } = await client.query(
       `INSERT INTO hataali_orders
          (customer_id, title, description, approx_price, source, delivery_fee, delivery_address, phone, lat, lng)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
@@ -22,6 +33,12 @@ router.post('/', async (req, res) => {
        source || null, fee, delivery_address || null, phone || null,
        lat || null, lng || null]
     );
+
+    created = rows[0];
+    await completeSubmission(client, submission, created);
+    await client.query('COMMIT');
+    client.release();
+    client = null;
 
     // إشعار للأدمن
     const { rows: admins } = await query(`SELECT id FROM users WHERE role='admin'`);
@@ -36,9 +53,12 @@ router.post('/', async (req, res) => {
 
     res.json(rows[0]);
   } catch (err) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    if (created) { console.error('Post-commit notification failed:', err); return res.json(created); }
+    if (err.status) return res.status(err.status).json({error: err.message});
     console.error('POST /hataali error:', err);
     res.status(500).json({ error: 'تعذر إرسال الطلب' });
-  }
+  } finally { client?.release(); }
 });
 
 // GET /api/hataali/my — طلبات العميل
@@ -46,7 +66,7 @@ router.get('/my', async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT h.*, d.full_name AS driver_name, d.phone AS driver_phone,
-              d.driver_lat, d.driver_lng
+              d.driver_lat, d.driver_lng, d.driver_location_updated_at
        FROM hataali_orders h
        LEFT JOIN users d ON d.id = h.driver_id
        WHERE h.customer_id = $1
@@ -286,7 +306,7 @@ router.get('/:id', async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT h.*, d.full_name AS driver_name, d.phone AS driver_phone,
-              d.driver_lat, d.driver_lng
+              d.driver_lat, d.driver_lng, d.driver_location_updated_at
        FROM hataali_orders h
        LEFT JOIN users d ON d.id = h.driver_id
        WHERE h.id = $1`,

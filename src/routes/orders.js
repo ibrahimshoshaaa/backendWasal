@@ -5,6 +5,8 @@ const { checkCancelRate, checkNewOrderSignals } = require('../services/fraud');
 const { isMerchantOpenNow } = require('../services/merchantHours');
 const { resolveOptions, storedSelections } = require('../services/options');
 
+const { beginSubmission, completeSubmission } = require('../services/submissions');
+
 const router = express.Router();
 
 // ─── Helper: notify via WebSocket + DB ────────────────────────────────────────
@@ -33,6 +35,11 @@ router.post('/', requireAuth, async (req, res) => {
     client = await pool.connect();
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1)', [req.userId]);
+    const submission = await beginSubmission(client, req, 'store');
+    if (submission?.response) {
+      await client.query('COMMIT');
+      return res.json(submission.response);
+    }
 
     const { rows: addresses } = await client.query(
       'SELECT id FROM addresses WHERE id=$1 AND user_id=$2',
@@ -111,6 +118,7 @@ router.post('/', requireAuth, async (req, res) => {
     merchantOwnerId = merchant.owner_user_id;
     await client.query('DELETE FROM cart_items WHERE user_id=$1 AND id=ANY($2)',
       [req.userId, cartLines.map(line => line.id)]);
+    await completeSubmission(client, submission, order);
     await client.query('COMMIT');
   } catch (err) {
     if (client) await client.query('ROLLBACK').catch(() => {});
@@ -169,7 +177,7 @@ router.get('/:id', requireAuth, async (req, res) => {
               u.full_name AS driver_name,
               u.phone AS driver_phone,
               u.driver_lat,
-              u.driver_lng
+              u.driver_lng, u.driver_location_updated_at
        FROM orders o
        LEFT JOIN merchants m ON m.id = o.merchant_id
        LEFT JOIN addresses a ON a.id = o.address_id
@@ -192,7 +200,7 @@ router.get('/:id/track', requireAuth, async (req, res) => {
               o.accepted_at, o.ready_at, o.picked_up_at, o.delivered_at,
               o.rating, o.driver_rating, o.driver_id, o.total, o.payment_method,
               o.delivery_otp,
-              u.driver_lat, u.driver_lng,
+              u.driver_lat, u.driver_lng, u.driver_location_updated_at,
               u.full_name AS driver_name, u.phone AS driver_phone,
               m.name AS merchant_name, m.address AS merchant_address,
               m.lat AS merchant_lat, m.lng AS merchant_lng,
