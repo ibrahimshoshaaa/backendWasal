@@ -32,7 +32,7 @@ app.use(cors());
 app.use(express.json());
 function staffSafe(value) {
   if (Array.isArray(value)) return value.map(staffSafe);
-  if (!value || typeof value !== 'object') return value;
+  if (!value || typeof value !== 'object' || value instanceof Date) return value;
   return Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'delivery_otp').map(([key, v]) => [key, staffSafe(v)]));
 }
 app.use((req, res, next) => {

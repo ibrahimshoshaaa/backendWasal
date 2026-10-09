@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
+const WebSocket = require('ws');
 const { createHmac } = require('node:crypto');
 const { query, pool } = require('../src/db');
 const { signToken } = require('../src/middleware/auth');
@@ -48,6 +49,7 @@ test('security, checkout pricing, OTP privacy and service accounting', async t =
       assert.equal((await request(`/driver/orders/${order.body.id}/accept`,'PUT',dt)).status,200);
       const visible=await request('/driver/orders','GET',dt);
       assert.ok(visible.body.every(o=>!Object.hasOwn(o,'delivery_otp')));
+      assert.equal(typeof visible.body.find(o=>o.id===order.body.id).created_at,'string');
       const tracked=await request(`/orders/${order.body.id}/track`,'GET',ct);
       assert.match(tracked.body.delivery_otp,/^\d{4}$/);
       assert.equal((await request(`/driver/orders/${order.body.id}/deliver`,'PUT',dt,{otp:tracked.body.delivery_otp})).status,200);
@@ -58,6 +60,25 @@ test('security, checkout pricing, OTP privacy and service accounting', async t =
       assert.equal(accepted.status,200);assert.equal(Object.hasOwn(accepted.body,'delivery_otp'),false);
       const errand=(await query("INSERT INTO hataali_orders(customer_id,title,status) VALUES($1,'Errand','approved') RETURNING id",[customer.id])).rows[0];
       const result=await request(`/hataali/${errand.id}/accept`,'POST',dt);assert.equal(result.status,200);assert.equal(Object.hasOwn(result.body,'delivery_otp'),false);
+    });
+    await t.test('location updates reach every active job and identify the service',async()=>{
+      const socket=new WebSocket('ws://127.0.0.1:32179/ws');
+      const messages=[];socket.on('message',data=>messages.push(JSON.parse(data)));
+      try {
+        await new Promise((resolve,reject)=>{socket.once('open',resolve);socket.once('error',reject);});
+        socket.send(JSON.stringify({type:'auth',token:ct}));
+        for(let i=0;i<50 && !messages.some(m=>m.type==='auth_ok');i++)await new Promise(r=>setTimeout(r,20));
+        assert.ok(messages.some(m=>m.type==='auth_ok'));
+        const ids=[];
+        for(let i=0;i<2;i++)ids.push((await query("INSERT INTO orders(customer_id,merchant_id,driver_id,items_json,status) VALUES($1,$2,$3,'[]','picked_up') RETURNING id",[customer.id,merchant.id,driver.id])).rows[0].id);
+        assert.equal((await request('/driver/location','PUT',dt,{lat:30,lng:31})).status,200);
+        for(let i=0;i<50 && messages.filter(m=>m.type==='driver_location').length<4;i++)await new Promise(r=>setTimeout(r,20));
+        const events=messages.filter(m=>m.type==='driver_location');
+        for(const id of ids)assert.ok(events.some(e=>e.service==='store'&&e.orderId===id));
+        assert.ok(events.some(e=>e.service==='hataali'));
+        assert.ok(events.some(e=>e.service==='trip'));
+        assert.equal((await request('/driver/location','PUT',dt,{lat:300,lng:31})).status,400);
+      } finally { socket.close(); }
     });
     await t.test('daily revenue is not multiplied and earnings include all three services',async()=>{
       const dated="now()-interval '10 days'";
