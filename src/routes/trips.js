@@ -12,8 +12,8 @@ async function getPrice(type) {
 // إشعار via WebSocket (لو المستخدم متصل دلوقتي) + DB + FCM push حقيقي
 // (نفس نمط notify() في orders.js) — ده اللي كان ناقص هنا واستبدلناه بدل
 // الـ INSERT المباشر اللي مكنش بيبعت push فعلي.
-function notify(req, userId, { title, body, type }) {
-  createNotification(userId, { title, body, type }).catch(() => {});
+function notify(req, userId, { title, body, type, resourceId = req.params.id }) {
+  createNotification(userId, { title, body, type, resourceId, service: 'trip' }).catch(() => {});
   req.app.locals.sendToUser?.(userId, { type: 'notification', title, body, notifType: type });
 }
 
@@ -78,7 +78,7 @@ router.post('/', async (req, res) => {
     // (ولد/بنت)، الإشعار يروح بس للمناديب من نفس النوع ده.
     const genderFilter = finalGender ? ` AND gender=$1` : '';
     const { rows: drivers } = await query(
-      `SELECT id FROM users WHERE role='driver' AND is_online=true${genderFilter}`,
+      `SELECT id FROM users WHERE role='driver' AND driver_status='active' AND is_online=true${genderFilter}`,
       finalGender ? [finalGender] : []
     );
     const sendToUser = req.app.locals.sendToUser;
@@ -222,7 +222,7 @@ router.post('/:id/accept', async (req, res) => {
     // تحقق إن نوع المندوب مطابق لاختيار العميل (لو العميل حدد نوع معين)
     const { rows: meRows } = await query(`SELECT gender FROM users WHERE id=$1`, [req.userId]);
     const myGender = meRows[0]?.gender || null;
-    const otp = String(Math.floor(1000 + Math.random() * 9000));
+    const otp = String(require('crypto').randomInt(1000, 10000));
     const { rows } = await query(
       `UPDATE trips SET driver_id=$1, status='accepted', updated_at=now(), delivery_otp=$4
        WHERE id=$2 AND status='pending'
@@ -259,7 +259,7 @@ router.post('/:id/pickup', async (req, res) => {
       [req.params.id, req.userId]
     );
     if (!check.length) return res.status(400).json({ error: 'لا يمكن تحديث الحالة' });
-    if (check[0].delivery_otp && check[0].delivery_otp !== otp) {
+    if (!check[0].delivery_otp || check[0].delivery_otp !== otp) {
       return res.status(400).json({ error: 'كود التأكيد غير صحيح' });
     }
 
@@ -374,3 +374,4 @@ router.post('/:id/message', async (req, res) => {
 });
 
 module.exports = router;
+

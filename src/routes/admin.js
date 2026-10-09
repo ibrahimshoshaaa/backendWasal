@@ -197,6 +197,7 @@ router.put('/drivers/:id/status', async (req, res) => {
     [status, req.params.id]
   );
   if (!rowCount) return res.status(404).json({ error: 'المندوب غير موجود' });
+  if (status !== 'active') req.app.locals.disconnectUser?.(req.params.id);
   res.json({ ok: true });
 });
 
@@ -624,16 +625,24 @@ router.get('/stats/overview', async (req, res) => {
 router.get('/stats/revenue', async (req, res) => {
   try {
     const { rows } = await query(`
-      SELECT
-        gs.day::date AS date,
-        COALESCE(SUM(o.total) FILTER (WHERE o.status='delivered'),0)::numeric AS orders_revenue,
-        COALESCE(SUM(t.price),0)::numeric AS trips_revenue,
-        COALESCE(SUM(h.delivery_fee),0)::numeric AS hataali_revenue
-      FROM generate_series(CURRENT_DATE-29, CURRENT_DATE, '1 day') AS gs(day)
-      LEFT JOIN orders o ON o.created_at::date = gs.day
-      LEFT JOIN trips  t ON t.created_at::date = gs.day AND t.status='delivered'
-      LEFT JOIN hataali_orders h ON h.created_at::date = gs.day AND h.status='delivered'
-      GROUP BY gs.day ORDER BY gs.day
+      WITH order_totals AS (
+        SELECT (created_at AT TIME ZONE 'Africa/Cairo')::date AS day, SUM(total) AS total
+        FROM orders WHERE status='delivered' GROUP BY 1
+      ), trip_totals AS (
+        SELECT (created_at AT TIME ZONE 'Africa/Cairo')::date AS day, SUM(price) AS total
+        FROM trips WHERE status='delivered' GROUP BY 1
+      ), hataali_totals AS (
+        SELECT (created_at AT TIME ZONE 'Africa/Cairo')::date AS day, SUM(delivery_fee) AS total
+        FROM hataali_orders WHERE status='delivered' GROUP BY 1
+      )
+      SELECT gs.day::date::text AS date, COALESCE(o.total,0)::numeric AS orders_revenue,
+        COALESCE(t.total,0)::numeric AS trips_revenue, COALESCE(h.total,0)::numeric AS hataali_revenue
+      FROM generate_series((now() AT TIME ZONE 'Africa/Cairo')::date-29,
+        (now() AT TIME ZONE 'Africa/Cairo')::date, '1 day') AS gs(day)
+      LEFT JOIN order_totals o ON o.day=gs.day::date
+      LEFT JOIN trip_totals t ON t.day=gs.day::date
+      LEFT JOIN hataali_totals h ON h.day=gs.day::date
+      ORDER BY gs.day
     `);
     res.json(rows);
   } catch (err) {
@@ -805,3 +814,4 @@ router.post('/notifications/broadcast', async (req, res) => {
 });
 
 module.exports = router;
+

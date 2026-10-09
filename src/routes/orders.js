@@ -3,6 +3,7 @@ const { pool, query, createNotification } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { checkCancelRate, checkNewOrderSignals } = require('../services/fraud');
 const { isMerchantOpenNow } = require('../services/merchantHours');
+const { resolveOptions, storedSelections } = require('../services/options');
 
 const router = express.Router();
 
@@ -31,6 +32,7 @@ router.post('/', requireAuth, async (req, res) => {
   try {
     client = await pool.connect();
     await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1)', [req.userId]);
 
     const { rows: addresses } = await client.query(
       'SELECT id FROM addresses WHERE id=$1 AND user_id=$2',
@@ -62,26 +64,28 @@ router.post('/', requireAuth, async (req, res) => {
       fail(400, 'أحد منتجات السلة غير متاح أو كميته غير صحيحة');
     }
 
-    const items = cartLines.map(line => {
+    const items = [];
+    for (const line of cartLines) {
+      const options = await resolveOptions(client.query.bind(client), line.product_id, storedSelections(line.selected_options));
       const price = Number(line.price);
-      const extra = Number(line.unit_extra || 0);
+      const extra = options.extra;
       if (!Number.isFinite(price) || !Number.isFinite(extra) || price < 0 || extra < 0) {
         fail(400, 'سعر أحد المنتجات غير صحيح');
       }
       const unitPrice = price + extra;
-      return {
+      items.push({
         id: line.id,
         product_id: line.product_id,
         name: line.name,
         price,
         unit_extra: extra,
         unit_price: unitPrice,
-        selected_options: line.selected_options || [],
+        selected_options: options.resolved,
         quantity: line.quantity,
         image_url: line.image_url,
         line_total: unitPrice * line.quantity,
-      };
-    });
+      });
+    }
     const subtotalCents = items.reduce((sum, item) =>
       sum + Math.round(item.unit_price * 100) * item.quantity, 0);
     const feeCents = Math.round(Number(merchant.delivery_fee) * 100);
@@ -229,9 +233,11 @@ router.post('/:id/cancel', requireAuth, async (req, res) => {
     const reason = req.body.reason || 'ألغى العميل الطلب';
     const { rows: updated } = await query(
       `UPDATE orders SET status='cancelled', cancel_reason=$1, cancelled_at=now()
-       WHERE id=$2 RETURNING *`,
-      [reason, order.id]
+       WHERE id=$2 AND customer_id=$3 AND status IN ('pending','accepted') RETURNING *`,
+      [reason, order.id, req.userId]
     );
+
+    if (!updated.length) return res.status(409).json({ error: 'تم تغيير حالة الطلب، لا يمكن إلغاؤه' });
 
     // Notify merchant
     const { rows: merchantRows } = await query(
@@ -309,3 +315,4 @@ router.post('/:id/rate', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+

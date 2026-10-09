@@ -32,6 +32,12 @@ async function initSchema() {
     );
   `);
 
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 0`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_hash TEXT`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_expires TIMESTAMPTZ`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_sent_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_attempts INT NOT NULL DEFAULT 0`);
+
   // ── أعمدة public_id لصور المستخدمين — Migration آمنة (IF NOT EXISTS) ─────────
   // بنحفظ public_id جنب كل رابط عشان نقدر نحذف الصورة القديمة من Cloudinary
   // لما المستخدم يستبدلها. الأعمدة اختيارية (nullable) ومش بتكسر أي endpoint قديم.
@@ -90,6 +96,12 @@ async function initSchema() {
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS delivery_fee NUMERIC(10,2) NOT NULL DEFAULT 20`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS delivery_time_minutes INT NOT NULL DEFAULT 30`);
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2) NOT NULL DEFAULT 0`);
+
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 0`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_hash TEXT`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_expires TIMESTAMPTZ`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_sent_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_attempts INT NOT NULL DEFAULT 0`);
 
   // ── أعمدة public_id للمتاجر (logo + cover) ───────────────────────────────────
   await query(`ALTER TABLE merchants ADD COLUMN IF NOT EXISTS image_public_id TEXT`);
@@ -403,8 +415,8 @@ async function seed() {
   if (adminCount[0].n === 0) {
     const hash = await bcrypt.hash('admin123', 10);
     await query(
-      `INSERT INTO users (full_name, email, password_hash, role, driver_status)
-       VALUES ('Admin', 'admin@wasal.app', $1, 'admin', 'active')`,
+      `INSERT INTO users (full_name, email, password_hash, role, driver_status, email_verified)
+       VALUES ('Admin', 'admin@wasal.app', $1, 'admin', 'active', true)`,
       [hash]
     );
     console.log('Seeded default admin -> admin@wasal.app / admin123');
@@ -412,7 +424,7 @@ async function seed() {
 }
 
 // Helper: create notification for a user (DB + FCM push لكل أجهزته)
-async function createNotification(userId, { title, body, type, orderId }) {
+async function createNotification(userId, { title, body, type, orderId, resourceId, service }) {
   await query(
     `INSERT INTO notifications (user_id, title, body, type, order_id)
      VALUES ($1, $2, $3, $4, $5)`,
@@ -430,7 +442,7 @@ async function createNotification(userId, { title, body, type, orderId }) {
       const r = await sendPushToTokens(tokens, {
         title,
         body,
-        data: { type: type || '', orderId: orderId || '' },
+        data: { type: type || '', orderId: resourceId || orderId || '', resourceId: resourceId || orderId || '', service: service || (type?.includes('hataali') ? 'hataali' : type?.includes('trip') ? 'trip' : 'store') },
       });
       // نظّف التوكنات الميتة (المستخدم مسح التطبيق مثلاً)
       if (r.removed && r.removed.length) {
@@ -463,7 +475,7 @@ async function notifyOnlineDrivers({ title, body, type, orderId, merchantId }, s
       }
     }
     const { rows } = await query(
-      `SELECT id FROM users WHERE role='driver' AND is_online=true${linkedFilter}`, params
+      `SELECT id FROM users WHERE role='driver' AND driver_status='active' AND is_online=true${linkedFilter}`, params
     );
     for (const d of rows) {
       createNotification(d.id, { title, body, type, orderId }).catch(() => {});
@@ -492,3 +504,4 @@ async function ensureSettings() {
     ON CONFLICT (key) DO NOTHING
   `);
 }
+

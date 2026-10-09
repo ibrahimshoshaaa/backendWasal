@@ -45,14 +45,14 @@ function ensureSendGrid() {
 }
 
 function generateVerificationCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(require('crypto').randomInt(100000, 1000000));
 }
 
-function buildHtml(code) {
+function buildHtml(code, reset = false) {
   return `
     <div dir="rtl" style="font-family: Cairo, Arial, sans-serif; text-align:center; padding:24px">
       <h2 style="color:#00C853">مرحبًا بك في وصل 👋</h2>
-      <p>كود تفعيل بريدك الإلكتروني هو:</p>
+      <p>${reset ? 'كود استعادة كلمة المرور هو:' : 'كود تفعيل بريدك الإلكتروني هو:'}</p>
       <div style="font-size:32px; font-weight:900; letter-spacing:6px; color:#212121; margin:16px 0">${code}</div>
       <p style="color:#757575; font-size:13px">الكود صالح لمدة 15 دقيقة. لو مطلبتش الكود ده، تجاهل الرسالة.</p>
     </div>
@@ -61,11 +61,11 @@ function buildHtml(code) {
 
 // نسخة نصية عادية (Plain Text) بجانب الـ HTML — رسائل فيها الاتنين مع بعض
 // بتقلل مؤشرات السبام فيلترز، وده معيار أساسي في أي إيميل تحقق احترافي.
-function buildText(code) {
-  return `مرحبًا بك في وصل\n\nكود تفعيل بريدك الإلكتروني هو: ${code}\n\nالكود صالح لمدة 15 دقيقة. لو مطلبتش الكود ده، تجاهل الرسالة.`;
+function buildText(code, reset = false) {
+  return `مرحبًا بك في وصل\n\n${reset ? 'كود استعادة كلمة المرور هو:' : 'كود تفعيل بريدك الإلكتروني هو:'} ${code}\n\nالكود صالح لمدة 15 دقيقة. لو مطلبتش الكود ده، تجاهل الرسالة.`;
 }
 
-async function trySendGrid(toEmail, code) {
+async function trySendGrid(toEmail, code, reset = false) {
   if (!ensureSendGrid()) return false;
   const fromEmail = process.env.SENDGRID_FROM_EMAIL;
   if (!fromEmail) return false;
@@ -73,9 +73,9 @@ async function trySendGrid(toEmail, code) {
     await sgMail.send({
       to: toEmail,
       from: { email: fromEmail, name: 'Wasal' },
-      subject: 'كود تفعيل حسابك في وصل',
-      text: buildText(code),
-      html: buildHtml(code),
+      subject: reset ? 'استعادة كلمة المرور في وصل' : 'كود تفعيل حسابك في وصل',
+      text: buildText(code, reset),
+      html: buildHtml(code, reset),
     });
     return true;
   } catch (e) {
@@ -86,7 +86,7 @@ async function trySendGrid(toEmail, code) {
 }
 
 // Mailjet Send API v3.1 — بعت عن طريق https المدمجة عشان منضيفش SDK زيادة.
-function tryMailjet(toEmail, code) {
+function tryMailjet(toEmail, code, reset = false) {
   return new Promise((resolve) => {
     const apiKey = process.env.MAILJET_API_KEY;
     const secretKey = process.env.MAILJET_SECRET_KEY;
@@ -98,9 +98,9 @@ function tryMailjet(toEmail, code) {
         {
           From: { Email: fromEmail, Name: 'Wasal' },
           To: [{ Email: toEmail }],
-          Subject: 'كود تفعيل حسابك في وصل',
-          TextPart: buildText(code),
-          HTMLPart: buildHtml(code),
+          Subject: reset ? 'استعادة كلمة المرور في وصل' : 'كود تفعيل حسابك في وصل',
+          TextPart: buildText(code, reset),
+          HTMLPart: buildHtml(code, reset),
         },
       ],
     });
@@ -144,17 +144,18 @@ function tryMailjet(toEmail, code) {
 
 // بيرجع { sent: boolean } — أبدًا مش بيرمي error عشان فشل الإيميل ميوقفش
 // عملية التسجيل نفسها.
-async function sendVerificationEmail(toEmail, code) {
-  if (await trySendGrid(toEmail, code)) {
+async function sendVerificationEmail(toEmail, code, reset = false) {
+  if (await trySendGrid(toEmail, code, reset)) {
     console.log('[email] sent via SendGrid ✔');
     return { sent: true, via: 'sendgrid' };
   }
-  if (await tryMailjet(toEmail, code)) {
+  if (await tryMailjet(toEmail, code, reset)) {
     console.log('[email] sent via Mailjet ✔ (SendGrid fallback triggered)');
     return { sent: true, via: 'mailjet' };
   }
-  console.warn('[email] both providers failed or unconfigured — skipping send. Code was:', code);
+  console.warn('[email] both providers failed or unconfigured');
   return { sent: false };
 }
 
-module.exports = { generateVerificationCode, sendVerificationEmail };
+module.exports = { generateVerificationCode, sendVerificationEmail, sendPasswordResetEmail: (email, code) => sendVerificationEmail(email, code, true) };
+

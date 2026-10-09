@@ -104,7 +104,7 @@ router.post('/:id/accept', async (req, res) => {
   try {
     if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
 
-    const otp = String(Math.floor(1000 + Math.random() * 9000));
+    const otp = String(require('crypto').randomInt(1000, 10000));
 
     const { rows } = await query(
       `UPDATE hataali_orders
@@ -122,7 +122,7 @@ router.post('/:id/accept', async (req, res) => {
     await createNotification(order.customer_id, {
       title: 'طلب هاتهالي 🛵',
       body: `المندوب قبل طلبك وفي الطريق لجلبه! كود التسليم: ${otp}`,
-      type: 'hataali',
+      type: 'hataali', resourceId: order.id, service: 'hataali',
     });
     sendToUser?.(order.customer_id, { type: 'notification', message: 'المندوب في الطريق لجلب طلبك!' });
 
@@ -146,7 +146,7 @@ router.post('/:id/deliver', async (req, res) => {
       [req.params.id, req.userId]
     );
     if (!check.length) return res.status(404).json({ error: 'الطلب مش موجود' });
-    if (check[0].delivery_otp && check[0].delivery_otp !== otp) {
+    if (!check[0].delivery_otp || check[0].delivery_otp !== otp) {
       return res.status(400).json({ error: 'كود التسليم غير صحيح' });
     }
 
@@ -166,7 +166,7 @@ router.post('/:id/deliver', async (req, res) => {
     await createNotification(order.customer_id, {
       title: 'تم التوصيل 🎉',
       body: 'تم توصيل طلب هاتهالي بنجاح!',
-      type: 'hataali',
+      type: 'hataali', resourceId: order.id, service: 'hataali',
     });
     sendToUser?.(order.customer_id, { type: 'notification', message: 'تم توصيل طلبك!' });
 
@@ -323,7 +323,7 @@ router.post('/:id/message', async (req, res) => {
     await createNotification(order.customer_id, {
       title: 'رسالة من المندوب',
       body: text,
-      type: 'hataali',
+      type: 'hataali', resourceId: order.id, service: 'hataali',
     });
     req.app.locals.sendToUser?.(order.customer_id, { type: 'notification', message: text });
 
@@ -335,3 +335,4 @@ router.post('/:id/message', async (req, res) => {
 });
 
 module.exports = router;
+
