@@ -1,4 +1,5 @@
 const express = require('express');
+const { setAuditContext } = require('../services/requestContext');
 const { pool, query, createNotification } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { checkCancelRate, checkNewOrderSignals } = require('../services/fraud');
@@ -34,6 +35,7 @@ router.post('/', requireAuth, async (req, res) => {
   try {
     client = await pool.connect();
     await client.query('BEGIN');
+    await setAuditContext(client, req);
     await client.query('SELECT pg_advisory_xact_lock($1)', [req.userId]);
     const submission = await beginSubmission(client, req, 'store');
     if (submission?.response) {

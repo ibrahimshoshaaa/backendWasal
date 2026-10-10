@@ -1,4 +1,6 @@
 const express = require('express');
+const { collection } = require('../services/finance');
+const { setAuditContext } = require('../services/requestContext');
 const { pool, query, notifyOnlineDrivers, createNotification } = require('../db');
 const { beginSubmission, completeSubmission } = require('../services/submissions');
 const router = express.Router();
@@ -15,6 +17,7 @@ router.post('/', async (req, res) => {
 
     client = await pool.connect();
     await client.query('BEGIN');
+    await setAuditContext(client, req);
     const submission = await beginSubmission(client, req, 'hataali');
     if (submission?.response) {
       await client.query('COMMIT');
@@ -109,8 +112,8 @@ router.get('/available', async (req, res) => {
       `SELECT h.*, u.full_name AS customer_name
        FROM hataali_orders h
        JOIN users u ON u.id = h.customer_id
-       WHERE h.status = 'approved' AND h.driver_id IS NULL
-       ORDER BY h.created_at ASC`
+       WHERE h.status = 'approved' AND (h.driver_id IS NULL OR h.driver_id=$1)
+       ORDER BY h.created_at ASC`, [req.userId]
     );
     res.json(rows);
   } catch (err) {
@@ -129,7 +132,7 @@ router.post('/:id/accept', async (req, res) => {
     const { rows } = await query(
       `UPDATE hataali_orders
        SET driver_id=$1, status='picked_up', updated_at=now(), delivery_otp=$3
-       WHERE id=$2 AND status='approved' AND driver_id IS NULL
+       WHERE id=$2 AND status='approved' AND (driver_id IS NULL OR driver_id=$1)
        RETURNING *`,
       [req.userId, req.params.id, otp]
     );
@@ -170,12 +173,13 @@ router.post('/:id/deliver', async (req, res) => {
       return res.status(400).json({ error: 'كود التسليم غير صحيح' });
     }
 
+    const {cash,cost} = collection(req.body, 'hataali');
     const { rows } = await query(
       `UPDATE hataali_orders
-       SET status='delivered', updated_at=now()
+       SET status='delivered', updated_at=now(),cash_collected=$3,purchase_cost=$4
        WHERE id=$1 AND driver_id=$2 AND status='picked_up'
        RETURNING *`,
-      [req.params.id, req.userId]
+      [req.params.id, req.userId,cash,cost]
     );
     if (!rows.length) return res.status(404).json({ error: 'الطلب مش موجود' });
 
@@ -192,6 +196,7 @@ router.post('/:id/deliver', async (req, res) => {
 
     res.json(rows[0]);
   } catch (err) {
+    if (err.status) return res.status(err.status).json({error:err.message});
     console.error('POST /hataali/:id/deliver error:', err);
     res.status(500).json({ error: 'تعذر تسليم الطلب' });
   }

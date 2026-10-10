@@ -1,13 +1,27 @@
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
+const { context, setAuditContext } = require('./services/requestContext');
+const { initOperationsSchema } = require('./services/operationsSchema');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: false },
 });
 
+pool.on('error', error => console.error(JSON.stringify({level:'error',code:error.code||'DATABASE_CONNECTION',source:'database'})));
+
 async function query(text, params) {
-  return pool.query(text, params);
+  const req = context.getStore();
+  if (!req?.userId || !/^\s*(INSERT|UPDATE|DELETE)\b/i.test(text)) return pool.query(text, params);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await setAuditContext(client, req);
+    const result = await client.query(text, params);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+  finally { client.release(); }
 }
 
 async function initSchema() {
@@ -408,6 +422,7 @@ async function initSchema() {
   await query(`CREATE INDEX IF NOT EXISTS idx_trips_status  ON trips(status)`);
 
   await ensureSettings();
+  await initOperationsSchema(query);
   await seed();
 }
 

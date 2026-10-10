@@ -1,4 +1,6 @@
 const express = require('express');
+const { collection } = require('../services/finance');
+const { setAuditContext } = require('../services/requestContext');
 const { pool, query, createNotification } = require('../db');
 const { beginSubmission, completeSubmission } = require('../services/submissions');
 const router = express.Router();
@@ -52,6 +54,7 @@ router.post('/', async (req, res) => {
 
     client = await pool.connect();
     await client.query('BEGIN');
+    await setAuditContext(client, req);
     const submission = await beginSubmission(client, req, 'trip');
     if (submission?.response) {
       await client.query('COMMIT');
@@ -199,10 +202,10 @@ router.get('/driver/available', async (req, res) => {
       `SELECT t.*, c.full_name AS customer_name, c.phone AS customer_phone
        FROM trips t
        JOIN users c ON c.id = t.customer_id
-       WHERE t.status='pending'
+       WHERE t.status='pending' AND (t.driver_id IS NULL OR t.driver_id=$2)
          AND (t.preferred_gender IS NULL OR t.preferred_gender = $1)
        ORDER BY t.created_at DESC`,
-      [myGender]
+      [myGender,req.userId]
     );
     res.json(rows);
   } catch (err) {
@@ -240,7 +243,7 @@ router.post('/:id/accept', async (req, res) => {
     const otp = String(require('crypto').randomInt(1000, 10000));
     const { rows } = await query(
       `UPDATE trips SET driver_id=$1, status='accepted', updated_at=now(), delivery_otp=$4
-       WHERE id=$2 AND status='pending'
+       WHERE id=$2 AND status='pending' AND (driver_id IS NULL OR driver_id=$1)
          AND (preferred_gender IS NULL OR preferred_gender=$3)
        RETURNING *`,
       [req.userId, req.params.id, myGender, otp]
@@ -302,10 +305,11 @@ router.post('/:id/pickup', async (req, res) => {
 router.post('/:id/deliver', async (req, res) => {
   try {
     if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
+    const {cash} = collection(req.body, 'trip');
     const { rows } = await query(
-      `UPDATE trips SET status='delivered', updated_at=now()
+      `UPDATE trips SET status='delivered', updated_at=now(),cash_collected=$3
        WHERE id=$1 AND driver_id=$2 AND status='picked_up' RETURNING *`,
-      [req.params.id, req.userId]
+      [req.params.id, req.userId,cash]
     );
     if (!rows[0]) return res.status(400).json({ error: 'لا يمكن إتمام الطلب' });
 
@@ -320,6 +324,7 @@ router.post('/:id/deliver', async (req, res) => {
 
     res.json(trip);
   } catch (err) {
+    if (err.status) return res.status(err.status).json({error:err.message});
     console.error(err);
     res.status(500).json({ error: 'تعذر إتمام الطلب' });
   }

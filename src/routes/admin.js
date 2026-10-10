@@ -1,6 +1,6 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const { query } = require('../db');
+const { query, pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
@@ -229,7 +229,8 @@ router.get('/orders', async (req, res) => {
 
 router.put('/orders/:id/status', async (req, res) => {
   const { status } = req.body || {};
-  if (!status) return res.status(400).json({ error: 'الحالة مطلوبة' });
+  if (!['pending','accepted','ready','picked_up','delivered','cancelled'].includes(status)) return res.status(400).json({error:'الحالة غير صحيحة'});
+  if (status==='cancelled' && (typeof req.body.reason!=='string' || req.body.reason.trim().length<3)) return res.status(400).json({error:'سبب الإلغاء مطلوب'});
 
   try {
     const { rows } = await query(
@@ -779,21 +780,24 @@ router.get('/settings', async (req, res) => {
   }
 });
 
-router.put('/settings', async (req, res) => {
+router.put('/settings', async (req, res, next) => {
+  let client;
   try {
-    const allowed = ['hataali_fee', 'wassalni_price', 'wassal_li_price'];
-    const updates = Object.entries(req.body).filter(([k]) => allowed.includes(k));
-    if (!updates.length) return res.status(400).json({ error: 'لا توجد قيم صالحة للتحديث' });
-    for (const [key, value] of updates) {
-      await query(
-        `INSERT INTO app_settings (key,value) VALUES ($1,$2)
-         ON CONFLICT (key) DO UPDATE SET value=$2`, [key, String(value)]
-      );
+    const allowed=['hataali_fee','wassalni_price','wassal_li_price','commission_percent','late_minutes','support_phone'];
+    const updates=Object.entries(req.body||{}).filter(([k])=>allowed.includes(k));
+    if(!updates.length) return res.status(400).json({error:'لا توجد قيم صالحة للتحديث'});
+    for(const [key,value] of updates) {
+      const v=String(value);
+      if(key==='support_phone') {
+        if(v!==''&&!/^\+?[0-9]{7,15}$/.test(v)) return res.status(400).json({error:'رقم الدعم غير صحيح'});
+      } else if(key==='late_minutes') {
+        if(!/^\d+$/.test(v)||Number(v)<5||Number(v)>240) return res.status(400).json({error:'حد التأخير لازم يكون من 5 إلى 240 دقيقة'});
+      } else if(!/^\d+(\.\d{1,2})?$/.test(v)||Number(v)>(key==='commission_percent'?100:10000000)) return res.status(400).json({error:'سعر أو نسبة غير صحيحة'});
     }
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: 'فشل حفظ الإعدادات' });
-  }
+    client=await pool.connect();await client.query('BEGIN');
+    for(const [key,value] of updates) await client.query('INSERT INTO app_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',[key,String(value)]);
+    await client.query('COMMIT');res.json({ok:true});
+  } catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});next(e);}finally{client?.release();}
 });
 
 // ─── إشعار جماعي broadcast ───────────────────────────────────────────────────

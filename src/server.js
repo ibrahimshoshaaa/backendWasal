@@ -29,6 +29,7 @@ const app = express();
 // (وأي حاجة تانية بتعتمد على req.ip) تقرأ الـ IP الحقيقي بتاع المستخدم مش IP الـ proxy.
 app.set('trust proxy', 1);
 app.use(cors());
+app.use(require('./services/diagnostics').middleware);
 app.use(express.json());
 function staffSafe(value) {
   if (Array.isArray(value)) return value.map(staffSafe);
@@ -62,6 +63,8 @@ app.use('/api/addresses', addressesRoutes);
 app.use('/api/merchant', merchantPanelRoutes);
 app.use('/api/driver', driverPanelRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/operations',require('./routes/operations'));
+app.use('/api/diagnostics',require('./routes/diagnostics'));
 app.use('/api/upload', uploadRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/notifications', notificationsRoutes);
@@ -71,8 +74,9 @@ app.use('/api/hataali', requireAuth, hataaliRoutes);
 app.use('/api/trips',   requireAuth, tripsRoutes);
 
 app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(err.status || 500).json({ error: err.status ? err.message : 'حدث خطأ غير متوقع' });
+  req.errorCode = /^[A-Za-z0-9_]{1,40}$/.test(err.code||'') ? err.code : err.name || 'Error';
+  const status = err.status || (err.code==='23514' ? 409 : 500);
+  res.status(status).json({ error: err.status ? err.message : err.code==='23514' ? 'حالة الطلب لا تسمح بالتغيير' : 'حدث خطأ غير متوقع' });
 });
 
 // ─── WebSocket server ──────────────────────────────────────────────────────────
