@@ -34,7 +34,6 @@ async function initSchema() {
       phone TEXT,
       role TEXT NOT NULL DEFAULT 'customer',
       avatar_url TEXT,
-      created_at TIMESTAMPTZ DEFAULT now(),
       is_online BOOLEAN NOT NULL DEFAULT false,
       driver_lat DOUBLE PRECISION,
       driver_lng DOUBLE PRECISION,
