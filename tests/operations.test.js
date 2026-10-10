@@ -15,7 +15,8 @@ test('operations, immutable accounting, settlements, support and diagnostics',as
     const user=async role=>(await query("INSERT INTO users(full_name,email,password_hash,role,email_verified,driver_status,is_online,gender) VALUES($1,$2,'test',$1,true,'active',true,'male') RETURNING *",[role,randomUUID()+'@example.test'])).rows[0];
     const customer=await user('customer'),other=await user('customer'),driver=await user('driver'),replacement=await user('driver'),admin=await user('admin');
     const ct=signToken(customer),ot=signToken(other),dt=signToken(driver),rt=signToken(replacement),at=signToken(admin);
-    const merchant=(await query("INSERT INTO merchants(name,status) VALUES('Operations shop','approved') RETURNING id")).rows[0];
+    const owner=await user('merchant');
+    const merchant=(await query("INSERT INTO merchants(owner_user_id,name,status) VALUES($1,'Operations shop','approved') RETURNING id",[owner.id])).rows[0];
     let store,trip,errand;
     await t.test('settings validate atomically and commission is snapshotted per new job',async()=>{
       assert.equal((await request('/admin/settings','PUT',at,{commission_percent:'101',late_minutes:'5'})).status,400);
