@@ -71,9 +71,9 @@ router.post('/', async (req, res) => {
        notes || null, price, finalGender]
     );
 
-    created = rows[0];
-    await completeSubmission(client, submission, created);
+    await completeSubmission(client, submission, rows[0]);
     await client.query('COMMIT');
+    created = rows[0];
     client.release();
     client = null;
 

@@ -128,6 +128,23 @@ test('security, checkout pricing, OTP privacy and service accounting', async t =
       await request('/cart','POST',ct,{product_id:product.id,quantity:1,selected_options:[{group_id:group.id,choice_ids:[choice.id]}]});
       assert.equal((await request('/orders','POST',ct,body,headers)).status,200);
     });
+    await t.test('a submission record failure never acknowledges a rolled-back trip or errand',async()=>{
+      const headers={'Idempotency-Key':'rollback-services-1234567890'};
+      await query(`CREATE FUNCTION reject_submission_test() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.request_key = 'rollback-services-1234567890' THEN RAISE EXCEPTION 'test failure'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER reject_submission_test BEFORE INSERT ON order_submissions FOR EACH ROW EXECUTE FUNCTION reject_submission_test()`);
+      try {
+        for(const [path,body,table,column,label] of [
+          ['/trips',{type:'wassalni',pickup_address:'Rollback trip',dropoff_address:'B'},'trips','pickup_address','Rollback trip'],
+          ['/hataali',{title:'Rollback errand'},'hataali_orders','title','Rollback errand']]) {
+          assert.equal((await request(path,'POST',ct,body,headers)).status,500);
+          assert.equal(Number((await query(`SELECT count(*) FROM ${table} WHERE customer_id=$1 AND ${column}=$2`,[customer.id,label])).rows[0].count),0);
+        }
+      } finally { await query('DROP TRIGGER reject_submission_test ON order_submissions; DROP FUNCTION reject_submission_test()'); }
+      for(const [path,body] of [['/trips',{type:'wassalni',pickup_address:'Rollback trip',dropoff_address:'B'}],['/hataali',{title:'Rollback errand'}]]) {
+        assert.equal((await request(path,'POST',ct,body,headers)).status,200);
+      }
+    });
     await t.test('GPS timestamps do not advance for a cached fix or move backwards',async()=>{
       const current=(await query('SELECT driver_location_updated_at FROM users WHERE id=$1',[driver.id])).rows[0].driver_location_updated_at;
       assert.ok(current);

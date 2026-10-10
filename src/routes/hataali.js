@@ -34,9 +34,9 @@ router.post('/', async (req, res) => {
        lat || null, lng || null]
     );
 
-    created = rows[0];
-    await completeSubmission(client, submission, created);
+    await completeSubmission(client, submission, rows[0]);
     await client.query('COMMIT');
+    created = rows[0];
     client.release();
     client = null;
 
