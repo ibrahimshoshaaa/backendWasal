@@ -92,7 +92,7 @@ router.put('/admin/drivers/:id/ledger/:entry/confirm',wrap(async(req,res)=>{
     if(entry.cash_collected!==null&&((entry.service!=='hataali'||entry.purchase_cost!==null)&&(entry.service!=='store'||entry.merchant_paid!==null)))fail(409,'القيد مؤكد بالفعل');
     const {cash,cost,merchantPaid}=finance.collection(req.body,entry.service);if(cash===null)fail(400,'التحصيل الفعلي مطلوب');
     if(entry.service==='store'&&merchantPaid>Number(entry.merchant_due)+Number(entry.merchant_paid||0))fail(400,'المدفوع للمتجر أكبر من قيمة المنتجات');
-    await client.query('UPDATE delivery_ledger SET cash_collected=$1,purchase_cost=$2::numeric,merchant_paid=$4::numeric,merchant_due=merchant_due+COALESCE(merchant_paid,0)-COALESCE($4::numeric,0),order_value=CASE WHEN service='hataali' THEN delivery_fee+COALESCE($2::numeric,0) ELSE order_value END WHERE id=$3',[cash,cost,entry.id,merchantPaid]);
+    await client.query(`UPDATE delivery_ledger SET cash_collected=$1,purchase_cost=$2::numeric,merchant_paid=$4::numeric,merchant_due=merchant_due+COALESCE(merchant_paid,0)-COALESCE($4::numeric,0),order_value=CASE WHEN service='hataali' THEN delivery_fee+COALESCE($2::numeric,0) ELSE order_value END WHERE id=$3`,[cash,cost,entry.id,merchantPaid]);
     await client.query(`INSERT INTO job_events(service,job_id,actor_id,actor_role,event,reason,details) VALUES($1,$2,$3,'admin','collection_confirmed',$4,$5)`,[entry.service,entry.job_id,req.userId,reason.trim().slice(0,500),JSON.stringify({cash_collected:cash,purchase_cost:cost,merchant_paid:merchantPaid})]);
     await client.query('COMMIT');res.json({ok:true});
   }catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}finally{client.release();}
