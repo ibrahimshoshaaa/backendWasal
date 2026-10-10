@@ -7,11 +7,13 @@ const router = express.Router();
 router.use(requireAuth, requireRole('admin'));
 
 // ─── Users (read-only overview) ────────────────────────────────────────────────
-router.get('/users', async (req, res) => {
-  const { rows } = await query(
+router.get('/users', async (req, res, next) => {
+  try {
+    const { rows } = await query(
     'SELECT id, full_name, email, phone, role, avatar_url, created_at FROM users ORDER BY id DESC'
   );
-  res.json(rows);
+    res.json(rows);
+  } catch (error) { next(error); }
 });
 
 // ─── Merchants ──────────────────────────────────────────────────────────────────

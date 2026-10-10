@@ -34,6 +34,7 @@ async function initSchema() {
       phone TEXT,
       role TEXT NOT NULL DEFAULT 'customer',
       avatar_url TEXT,
+      created_at TIMESTAMPTZ DEFAULT now(),
       is_online BOOLEAN NOT NULL DEFAULT false,
       driver_lat DOUBLE PRECISION,
       driver_lng DOUBLE PRECISION,
@@ -47,6 +48,9 @@ async function initSchema() {
   `);
 
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 0`);
+  // Existing accounts have no recorded creation date; leave it unknown.
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE users ALTER COLUMN created_at SET DEFAULT now()`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_hash TEXT`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_expires TIMESTAMPTZ`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_sent_at TIMESTAMPTZ`);
