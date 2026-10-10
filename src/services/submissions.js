@@ -48,4 +48,15 @@ async function commitSubmission(client, submission, response) {
   return response;
 }
 
-module.exports = { prepareSubmission, commitSubmission };
+async function respondSubmissionError(client, created, error, res, source, message) {
+  if (client) await client.query('ROLLBACK').catch(() => {});
+  if (created) {
+    console.error('Post-commit notification failed:', error);
+    return res.json(created);
+  }
+  if (error.status) return res.status(error.status).json({ error: error.message });
+  console.error(source, error);
+  return res.status(500).json({ error: message });
+}
+
+module.exports = { prepareSubmission, commitSubmission, respondSubmissionError };

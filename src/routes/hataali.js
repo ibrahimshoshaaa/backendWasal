@@ -1,7 +1,7 @@
 const express = require('express');
 const { collection } = require('../services/finance');
 const { pool, query, notifyOnlineDrivers, createNotification } = require('../db');
-const { prepareSubmission, commitSubmission } = require('../services/submissions');
+const { prepareSubmission, commitSubmission, respondSubmissionError } = require('../services/submissions');
 const router = express.Router();
 
 // ─── Customer ─────────────────────────────────────────────────────────────────
@@ -50,11 +50,7 @@ router.post('/', async (req, res) => {
 
     res.json(rows[0]);
   } catch (err) {
-    if (client) await client.query('ROLLBACK').catch(() => {});
-    if (created) { console.error('Post-commit notification failed:', err); return res.json(created); }
-    if (err.status) return res.status(err.status).json({error: err.message});
-    console.error('POST /hataali error:', err);
-    res.status(500).json({ error: 'تعذر إرسال الطلب' });
+    await respondSubmissionError(client, created, err, res, 'POST /hataali error:', 'تعذر إرسال الطلب');
   } finally { client?.release(); }
 });
 
