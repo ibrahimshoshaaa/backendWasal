@@ -52,6 +52,15 @@ test('operations, immutable accounting, settlements, support and diagnostics',as
       assert.equal((await request(path,'POST',at,{...body,amount:8,expected_balance:8},'settlement-final-12345678')).status,200);
       assert.equal((await request('/operations/driver/statement','GET',dt)).body.account.balance,0);
     });
+    await t.test('platform-to-driver settlements cover negative balances and reject the reversed direction',async()=>{
+      const refundDriver=await user('driver');
+      await query("INSERT INTO hataali_orders(customer_id,driver_id,title,status,delivery_fee,purchase_cost,cash_collected) VALUES($1,$2,'Uncollected expense','delivered',35,100,0)",[customer.id,refundDriver.id]);
+      const account=(await request(`/operations/admin/drivers/${refundDriver.id}/statement`,'GET',at)).body.account;assert.equal(account.balance,-128);
+      const path=`/operations/admin/drivers/${refundDriver.id}/settlements`,body={amount:128,expected_balance:-128,reason:'Paid driver reimbursement'};
+      assert.equal((await request(path,'POST',at,{...body,direction:'driver_to_platform'},'refund-wrong-way-1234567')).status,400);
+      assert.equal((await request(path,'POST',at,{...body,direction:'platform_to_driver'},'refund-correct-way-12345')).status,200);
+      assert.equal((await request(`/operations/admin/drivers/${refundDriver.id}/statement`,'GET',at)).body.account.balance,0);
+    });
     await t.test('older unconfirmed collections block settlements until an audited admin confirmation',async()=>{
       const legacy=(await query("INSERT INTO orders(customer_id,merchant_id,driver_id,items_json,status,subtotal,total,delivery_fee) VALUES($1,$2,$3,'[]','delivered',100,110,10) RETURNING id",[customer.id,merchant.id,replacement.id])).rows[0];
       const statement=(await request(`/operations/admin/drivers/${replacement.id}/statement`,'GET',at)).body;assert.equal(statement.account.unconfirmed,1);
