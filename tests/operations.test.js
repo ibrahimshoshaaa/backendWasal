@@ -16,6 +16,19 @@ test('operations, immutable accounting, settlements, support and diagnostics',as
     const customer=await user('customer'),other=await user('customer'),driver=await user('driver'),replacement=await user('driver'),admin=await user('admin');
     const ct=signToken(customer),ot=signToken(other),dt=signToken(driver),rt=signToken(replacement),at=signToken(admin);
     const owner=await user('merchant');
+    await t.test('admin users and overview load with creation dates and role protection',async()=>{
+      const users=await request('/admin/users','GET',at);
+      assert.equal(users.status,200);
+      const account=users.body.find(u=>u.id===customer.id);
+      assert.equal(account.email,customer.email);
+      assert.ok(Number.isFinite(Date.parse(account.created_at)));
+      assert.equal(account.password_hash,undefined);
+      assert.equal((await request('/admin/users','GET',ct)).status,403);
+      const overview=await request('/admin/stats/overview','GET',at);
+      assert.equal(overview.status,200);
+      assert.ok(overview.body.customers>=2);
+      assert.equal((await request('/health')).status,200);
+    });
     const merchant=(await query("INSERT INTO merchants(owner_user_id,name,status) VALUES($1,'Operations shop','approved') RETURNING id",[owner.id])).rows[0];
     let store,trip,errand;
     await t.test('settings validate atomically and commission is snapshotted per new job',async()=>{
