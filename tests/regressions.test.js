@@ -7,9 +7,9 @@ const { query, pool } = require('../src/db');
 const { signToken } = require('../src/middleware/auth');
 const { isMerchantOpenNow } = require('../src/services/merchantHours');
 const api = 'http://127.0.0.1:32179/api';
-async function request(path, method='GET', token, body) {
+async function request(path, method='GET', token, body, extraHeaders={}) {
   const response = await fetch(api+path, { method,
-    headers: { ...(token ? {Authorization:`Bearer ${token}`} : {}), ...(body ? {'Content-Type':'application/json'} : {}) },
+    headers: { ...(token ? {Authorization:`Bearer ${token}`} : {}), ...(body ? {'Content-Type':'application/json'} : {}), ...extraHeaders },
     body: body ? JSON.stringify(body) : undefined });
   return {status:response.status, body:await response.json()};
 }
@@ -28,7 +28,7 @@ test('security, checkout pricing, OTP privacy and service accounting', async t =
     assert.ok(ready,output);
     const unique=`regression-${Date.now()}`;
     const user=async role=>(await query(`INSERT INTO users(full_name,email,password_hash,role,driver_status,is_online,email_verified)
-      VALUES($1,$2,'test',$1,'active',true,true) RETURNING *`,[role,`${unique}-${role}@example.test`])).rows[0];
+      VALUES($1,$2,'test',$1,'active',true,true) RETURNING *`,[role,`${unique}-${role}-${require("node:crypto").randomUUID()}@example.test`])).rows[0];
     const customer=await user('customer'), driver=await user('driver'), merchantUser=await user('merchant'), admin=await user('admin');
     const ct=signToken(customer),dt=signToken(driver),at=signToken(admin);
     const merchant=(await query("INSERT INTO merchants(owner_user_id,name,status,delivery_fee,min_order) VALUES($1,'Regression shop','approved',15,0) RETURNING id",[merchantUser.id])).rows[0];
@@ -93,6 +93,68 @@ test('security, checkout pricing, OTP privacy and service accounting', async t =
       const row=report.body.find(r=>r.date.startsWith(day));assert.ok(row);
       assert.deepEqual([row.orders_revenue,row.trips_revenue,row.hataali_revenue].map(Number),[300,200,35]);
       const stats=await request('/driver/stats','GET',dt);assert.equal(stats.body.total.earnings,250);assert.equal(stats.body.total.count,7);
+    });
+    await t.test('concurrent checkout retries return one order after cart clearance',async()=>{
+      await request('/cart','POST',ct,{product_id:product.id,quantity:1,selected_options:[{group_id:group.id,choice_ids:[choice.id]}]});
+      const body={merchant_id:merchant.id,address_id:address.id};
+      const headers={'Idempotency-Key':'checkout-retry-1234567890'};
+      const results=await Promise.all([request('/orders','POST',ct,body,headers),request('/orders','POST',ct,body,headers)]);
+      assert.ok(results.every(r=>r.status===200),JSON.stringify(results));
+      assert.equal(results[0].body.id,results[1].body.id);
+      const retry=await request('/orders','POST',ct,{address_id:address.id,merchant_id:merchant.id},headers);
+      assert.equal(retry.body.id,results[0].body.id);
+      assert.equal((await request('/orders','POST',ct,{...body,notes:'changed'},headers)).status,409);
+      assert.equal(Number((await query("SELECT count(*) FROM order_submissions WHERE user_id=$1 AND service='store'",[customer.id])).rows[0].count),1);
+    });
+    await t.test('trip and errand retries are atomic and scoped to user and service',async()=>{
+      const headers={'Idempotency-Key':'service-retry-1234567890'};
+      for(const [path,body] of [['/trips',{type:'wassalni',pickup_address:'Retry A',dropoff_address:'Retry B'}],['/hataali',{title:'Retry errand'}]]) {
+        const results=await Promise.all([request(path,'POST',ct,body,headers),request(path,'POST',ct,body,headers)]);
+        assert.ok(results.every(r=>r.status===200),JSON.stringify(results));
+        assert.equal(results[0].body.id,results[1].body.id);
+        assert.equal((await request(path,'POST',ct,{...body,notes:'different'},headers)).status,409);
+        assert.equal((await request(path,'POST',ct,body,{'Idempotency-Key':'bad'})).status,400);
+        const other=await user('customer');
+        const separate=await request(path,'POST',signToken(other),body,headers);
+        assert.equal(separate.status,200);assert.notEqual(separate.body.id,results[0].body.id);
+        const table=path==='/trips'?'trips':'hataali_orders';
+        assert.equal(Number((await query(`SELECT count(*) FROM ${table} WHERE customer_id=$1 AND id >= $2`,[customer.id,results[0].body.id])).rows[0].count),1);
+      }
+    });
+    await t.test('failed checkout rolls back its retry record and can be corrected',async()=>{
+      const headers={'Idempotency-Key':'rollback-retry-1234567890'};
+      const body={merchant_id:merchant.id,address_id:address.id};
+      assert.equal((await request('/orders','POST',ct,body,headers)).status,400);
+      await request('/cart','POST',ct,{product_id:product.id,quantity:1,selected_options:[{group_id:group.id,choice_ids:[choice.id]}]});
+      assert.equal((await request('/orders','POST',ct,body,headers)).status,200);
+    });
+    await t.test('a submission record failure never acknowledges a rolled-back trip or errand',async()=>{
+      const headers={'Idempotency-Key':'rollback-services-1234567890'};
+      await query(`CREATE FUNCTION reject_submission_test() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.request_key = 'rollback-services-1234567890' THEN RAISE EXCEPTION 'test failure'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER reject_submission_test BEFORE INSERT ON order_submissions FOR EACH ROW EXECUTE FUNCTION reject_submission_test()`);
+      try {
+        for(const [path,body,table,column,label] of [
+          ['/trips',{type:'wassalni',pickup_address:'Rollback trip',dropoff_address:'B'},'trips','pickup_address','Rollback trip'],
+          ['/hataali',{title:'Rollback errand'},'hataali_orders','title','Rollback errand']]) {
+          assert.equal((await request(path,'POST',ct,body,headers)).status,500);
+          assert.equal(Number((await query(`SELECT count(*) FROM ${table} WHERE customer_id=$1 AND ${column}=$2`,[customer.id,label])).rows[0].count),0);
+        }
+      } finally { await query('DROP TRIGGER reject_submission_test ON order_submissions; DROP FUNCTION reject_submission_test()'); }
+      for(const [path,body] of [['/trips',{type:'wassalni',pickup_address:'Rollback trip',dropoff_address:'B'}],['/hataali',{title:'Rollback errand'}]]) {
+        assert.equal((await request(path,'POST',ct,body,headers)).status,200);
+      }
+    });
+    await t.test('GPS timestamps do not advance for a cached fix or move backwards',async()=>{
+      const current=(await query('SELECT driver_location_updated_at FROM users WHERE id=$1',[driver.id])).rows[0].driver_location_updated_at;
+      assert.ok(current);
+      const old=new Date(new Date(current).getTime()-1000).toISOString();
+      const ignored=await request('/driver/location','PUT',dt,{lat:29,lng:30,recorded_at:old});
+      assert.equal(ignored.body.ignored,true);
+      const tracked=(await query('SELECT driver_lat,driver_location_updated_at FROM users WHERE id=$1',[driver.id])).rows[0];
+      assert.equal(tracked.driver_lat,30);assert.equal(new Date(tracked.driver_location_updated_at).getTime(),new Date(current).getTime());
+      assert.equal((await request('/driver/location','PUT',dt,{lat:30,lng:31,recorded_at:'invalid'})).status,400);
+      assert.equal((await request('/driver/location','PUT',dt,{lat:30,lng:31,recorded_at:new Date(Date.now()+120000).toISOString()})).status,400);
     });
     await t.test('suspension blocks an already issued token',async()=>{
       assert.equal((await request(`/admin/drivers/${driver.id}/status`,'PUT',at,{status:'suspended'})).status,200);

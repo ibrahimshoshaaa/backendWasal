@@ -1,20 +1,31 @@
 const express = require('express');
-const { query, notifyOnlineDrivers, createNotification } = require('../db');
+const { collection } = require('../services/finance');
+const { pool, query, notifyOnlineDrivers, createNotification } = require('../db');
+const { prepareSubmission, commitSubmission, respondSubmissionError } = require('../services/submissions');
 const router = express.Router();
 
 // ─── Customer ─────────────────────────────────────────────────────────────────
 
 // POST /api/hataali — العميل يرسل طلب جديد
 router.post('/', async (req, res) => {
+  let client;
+  let created;
   try {
     const { title, description, approx_price, source, delivery_address, phone, lat, lng } = req.body || {};
     if (!title) return res.status(400).json({ error: 'اسم الطلب مطلوب' });
 
-    // جلب رسوم التوصيل من الإعدادات
-    const { rows: feeRows } = await query(`SELECT value FROM app_settings WHERE key='hataali_fee'`);
-    const fee = parseFloat(feeRows[0]?.value || '35');
+    client = await pool.connect();
+    const submission = await prepareSubmission(client, req, 'hataali');
+    if (submission?.response) {
+      await client.query('COMMIT');
+      return res.json(submission.response);
+    }
 
-    const { rows } = await query(
+    // جلب رسوم التوصيل من الإعدادات
+    const { rows: feeRows } = await client.query(`SELECT value FROM app_settings WHERE key='hataali_fee'`);
+    const fee = Number.parseFloat(feeRows[0]?.value || '35');
+
+    const { rows } = await client.query(
       `INSERT INTO hataali_orders
          (customer_id, title, description, approx_price, source, delivery_fee, delivery_address, phone, lat, lng)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
@@ -22,6 +33,9 @@ router.post('/', async (req, res) => {
        source || null, fee, delivery_address || null, phone || null,
        lat || null, lng || null]
     );
+
+    created = await commitSubmission(client, submission, rows[0]);
+    client = null;
 
     // إشعار للأدمن
     const { rows: admins } = await query(`SELECT id FROM users WHERE role='admin'`);
@@ -36,9 +50,8 @@ router.post('/', async (req, res) => {
 
     res.json(rows[0]);
   } catch (err) {
-    console.error('POST /hataali error:', err);
-    res.status(500).json({ error: 'تعذر إرسال الطلب' });
-  }
+    await respondSubmissionError(client, created, err, res, 'POST /hataali error:', 'تعذر إرسال الطلب');
+  } finally { client?.release(); }
 });
 
 // GET /api/hataali/my — طلبات العميل
@@ -46,7 +59,7 @@ router.get('/my', async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT h.*, d.full_name AS driver_name, d.phone AS driver_phone,
-              d.driver_lat, d.driver_lng
+              d.driver_lat, d.driver_lng, d.driver_location_updated_at
        FROM hataali_orders h
        LEFT JOIN users d ON d.id = h.driver_id
        WHERE h.customer_id = $1
@@ -89,8 +102,8 @@ router.get('/available', async (req, res) => {
       `SELECT h.*, u.full_name AS customer_name
        FROM hataali_orders h
        JOIN users u ON u.id = h.customer_id
-       WHERE h.status = 'approved' AND h.driver_id IS NULL
-       ORDER BY h.created_at ASC`
+       WHERE h.status = 'approved' AND (h.driver_id IS NULL OR h.driver_id=$1)
+       ORDER BY h.created_at ASC`, [req.userId]
     );
     res.json(rows);
   } catch (err) {
@@ -109,7 +122,7 @@ router.post('/:id/accept', async (req, res) => {
     const { rows } = await query(
       `UPDATE hataali_orders
        SET driver_id=$1, status='picked_up', updated_at=now(), delivery_otp=$3
-       WHERE id=$2 AND status='approved' AND driver_id IS NULL
+       WHERE id=$2 AND status='approved' AND (driver_id IS NULL OR driver_id=$1)
        RETURNING *`,
       [req.userId, req.params.id, otp]
     );
@@ -150,12 +163,13 @@ router.post('/:id/deliver', async (req, res) => {
       return res.status(400).json({ error: 'كود التسليم غير صحيح' });
     }
 
+    const {cash,cost} = collection(req.body, 'hataali');
     const { rows } = await query(
       `UPDATE hataali_orders
-       SET status='delivered', updated_at=now()
+       SET status='delivered', updated_at=now(),cash_collected=$3,purchase_cost=$4
        WHERE id=$1 AND driver_id=$2 AND status='picked_up'
        RETURNING *`,
-      [req.params.id, req.userId]
+      [req.params.id, req.userId,cash,cost]
     );
     if (!rows.length) return res.status(404).json({ error: 'الطلب مش موجود' });
 
@@ -172,6 +186,7 @@ router.post('/:id/deliver', async (req, res) => {
 
     res.json(rows[0]);
   } catch (err) {
+    if (err.status) return res.status(err.status).json({error:err.message});
     console.error('POST /hataali/:id/deliver error:', err);
     res.status(500).json({ error: 'تعذر تسليم الطلب' });
   }
@@ -257,7 +272,7 @@ router.put('/admin/:id', async (req, res) => {
 router.get('/settings', async (req, res) => {
   try {
     const { rows } = await query(`SELECT value FROM app_settings WHERE key='hataali_fee'`);
-    res.json({ hataali_fee: parseFloat(rows[0]?.value || '35') });
+    res.json({ hataali_fee: Number.parseFloat(rows[0]?.value || '35') });
   } catch (err) {
     console.error('GET /hataali/settings error:', err);
     res.status(500).json({ error: 'تعذر تحميل الإعدادات' });
@@ -272,7 +287,7 @@ router.put('/settings', async (req, res) => {
     if (!hataali_fee || isNaN(hataali_fee)) return res.status(400).json({ error: 'رسوم غير صحيحة' });
     await query(`INSERT INTO app_settings (key,value) VALUES ('hataali_fee',$1)
                  ON CONFLICT (key) DO UPDATE SET value=$1`, [String(hataali_fee)]);
-    res.json({ hataali_fee: parseFloat(hataali_fee) });
+    res.json({ hataali_fee: Number.parseFloat(hataali_fee) });
   } catch (err) {
     console.error('PUT /hataali/settings error:', err);
     res.status(500).json({ error: 'تعذر تحديث الإعدادات' });
@@ -286,7 +301,7 @@ router.get('/:id', async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT h.*, d.full_name AS driver_name, d.phone AS driver_phone,
-              d.driver_lat, d.driver_lng
+              d.driver_lat, d.driver_lng, d.driver_location_updated_at
        FROM hataali_orders h
        LEFT JOIN users d ON d.id = h.driver_id
        WHERE h.id = $1`,

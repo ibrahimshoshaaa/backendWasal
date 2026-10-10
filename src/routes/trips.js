@@ -1,14 +1,10 @@
 const express = require('express');
-const { query, createNotification } = require('../db');
+const { collection } = require('../services/finance');
+const { pool, query, createNotification } = require('../db');
+const { prepareSubmission, commitSubmission, respondSubmissionError } = require('../services/submissions');
 const router = express.Router();
 
 // ─── helpers ────────────────────────────────────────────────────────────────────
-async function getPrice(type) {
-  const key = type === 'wassalni' ? 'wassalni_price' : 'wassal_li_price';
-  const { rows } = await query(`SELECT value FROM app_settings WHERE key=$1`, [key]);
-  return parseFloat(rows[0]?.value || '50');
-}
-
 // إشعار via WebSocket (لو المستخدم متصل دلوقتي) + DB + FCM push حقيقي
 // (نفس نمط notify() في orders.js) — ده اللي كان ناقص هنا واستبدلناه بدل
 // الـ INSERT المباشر اللي مكنش بيبعت push فعلي.
@@ -31,7 +27,7 @@ router.get('/settings', async (req, res) => {
       `SELECT key, value FROM app_settings WHERE key IN ('wassalni_price','wassal_li_price')`
     );
     const out = {};
-    rows.forEach(r => { out[r.key] = parseFloat(r.value); });
+    rows.forEach(r => { out[r.key] = Number.parseFloat(r.value); });
     res.json(out);
   } catch (err) {
     console.error(err);
@@ -41,6 +37,8 @@ router.get('/settings', async (req, res) => {
 
 // POST /api/trips — طلب جديد (wassalni أو wassal_li)
 router.post('/', async (req, res) => {
+  let client;
+  let created;
   try {
     const {
       type, pickup_address, pickup_lat, pickup_lng,
@@ -53,9 +51,17 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'عنوان الانطلاق والوجهة مطلوبان' });
     const finalGender = ['male', 'female'].includes(preferred_gender) ? preferred_gender : null;
 
-    const price = await getPrice(type);
+    client = await pool.connect();
+    const submission = await prepareSubmission(client, req, 'trip');
+    if (submission?.response) {
+      await client.query('COMMIT');
+      return res.json(submission.response);
+    }
 
-    const { rows } = await query(
+    const { rows: prices } = await client.query('SELECT value FROM app_settings WHERE key=$1', [type === 'wassalni' ? 'wassalni_price' : 'wassal_li_price']);
+    const price = Number.parseFloat(prices[0]?.value || '50');
+
+    const { rows } = await client.query(
       `INSERT INTO trips
          (customer_id, type, pickup_address, pickup_lat, pickup_lng,
           dropoff_address, dropoff_lat, dropoff_lng, notes, price, preferred_gender)
@@ -64,6 +70,9 @@ router.post('/', async (req, res) => {
        dropoff_address, dropoff_lat || null, dropoff_lng || null,
        notes || null, price, finalGender]
     );
+
+    created = await commitSubmission(client, submission, rows[0]);
+    client = null;
 
     const label = type === 'wassalni' ? 'وصّلني' : 'وصّل لي';
     const genderNote = finalGender ? (finalGender === 'male' ? ' (سائق)' : ' (سائقة)') : '';
@@ -93,9 +102,8 @@ router.post('/', async (req, res) => {
 
     res.json(rows[0]);
   } catch (err) {
-    console.error('POST /trips error:', err);
-    res.status(500).json({ error: 'تعذر إرسال الطلب' });
-  }
+    await respondSubmissionError(client, created, err, res, 'POST /trips error:', 'تعذر إرسال الطلب');
+  } finally { client?.release(); }
 });
 
 // GET /api/trips/my — طلبات العميل
@@ -103,7 +111,7 @@ router.get('/my', async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT t.*, d.full_name AS driver_name, d.phone AS driver_phone,
-              d.driver_lat, d.driver_lng
+              d.driver_lat, d.driver_lng, d.driver_location_updated_at
        FROM trips t
        LEFT JOIN users d ON d.id = t.driver_id
        WHERE t.customer_id = $1
@@ -124,7 +132,7 @@ router.get('/:id', async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT t.*, d.full_name AS driver_name, d.phone AS driver_phone,
-              d.driver_lat, d.driver_lng
+              d.driver_lat, d.driver_lng, d.driver_location_updated_at
        FROM trips t
        LEFT JOIN users d ON d.id = t.driver_id
        WHERE t.id = $1`,
@@ -184,10 +192,10 @@ router.get('/driver/available', async (req, res) => {
       `SELECT t.*, c.full_name AS customer_name, c.phone AS customer_phone
        FROM trips t
        JOIN users c ON c.id = t.customer_id
-       WHERE t.status='pending'
+       WHERE t.status='pending' AND (t.driver_id IS NULL OR t.driver_id=$2)
          AND (t.preferred_gender IS NULL OR t.preferred_gender = $1)
        ORDER BY t.created_at DESC`,
-      [myGender]
+      [myGender,req.userId]
     );
     res.json(rows);
   } catch (err) {
@@ -225,7 +233,7 @@ router.post('/:id/accept', async (req, res) => {
     const otp = String(require('crypto').randomInt(1000, 10000));
     const { rows } = await query(
       `UPDATE trips SET driver_id=$1, status='accepted', updated_at=now(), delivery_otp=$4
-       WHERE id=$2 AND status='pending'
+       WHERE id=$2 AND status='pending' AND (driver_id IS NULL OR driver_id=$1)
          AND (preferred_gender IS NULL OR preferred_gender=$3)
        RETURNING *`,
       [req.userId, req.params.id, myGender, otp]
@@ -287,10 +295,11 @@ router.post('/:id/pickup', async (req, res) => {
 router.post('/:id/deliver', async (req, res) => {
   try {
     if (req.userRole !== 'driver') return res.status(403).json({ error: 'للمناديب فقط' });
+    const {cash} = collection(req.body, 'trip');
     const { rows } = await query(
-      `UPDATE trips SET status='delivered', updated_at=now()
+      `UPDATE trips SET status='delivered', updated_at=now(),cash_collected=$3
        WHERE id=$1 AND driver_id=$2 AND status='picked_up' RETURNING *`,
-      [req.params.id, req.userId]
+      [req.params.id, req.userId,cash]
     );
     if (!rows[0]) return res.status(400).json({ error: 'لا يمكن إتمام الطلب' });
 
@@ -305,6 +314,7 @@ router.post('/:id/deliver', async (req, res) => {
 
     res.json(trip);
   } catch (err) {
+    if (err.status) return res.status(err.status).json({error:err.message});
     console.error(err);
     res.status(500).json({ error: 'تعذر إتمام الطلب' });
   }

@@ -1,4 +1,5 @@
 const express = require('express');
+const { collection } = require('../services/finance');
 const { query, createNotification } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
@@ -106,11 +107,11 @@ router.get('/stats', requireAuth, requireRole('driver'), async (req, res) => {
          COUNT(*) AS total_count,
          COALESCE(SUM(delivery_fee), 0) AS total_earnings
        FROM (
-         SELECT delivered_at, delivery_fee FROM orders WHERE driver_id=$1 AND status='delivered'
+         SELECT delivered_at, delivery_fee-round(delivery_fee*commission_percent/100,2) AS delivery_fee FROM orders WHERE driver_id=$1 AND status='delivered'
          UNION ALL
-         SELECT updated_at AS delivered_at, delivery_fee FROM hataali_orders WHERE driver_id=$1 AND status='delivered'
+         SELECT updated_at AS delivered_at, delivery_fee-round(delivery_fee*commission_percent/100,2) AS delivery_fee FROM hataali_orders WHERE driver_id=$1 AND status='delivered'
          UNION ALL
-         SELECT updated_at AS delivered_at, price AS delivery_fee FROM trips WHERE driver_id=$1 AND status='delivered'
+         SELECT updated_at AS delivered_at, price-round(price*commission_percent/100,2) AS delivery_fee FROM trips WHERE driver_id=$1 AND status='delivered'
        ) deliveries`,
       [req.userId]
     );
@@ -219,7 +220,16 @@ router.put('/location', requireAuth, requireRole('driver'), async (req, res) => 
     if (typeof lat !== 'number' || typeof lng !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
       return res.status(400).json({ error: 'الإحداثيات مطلوبة' });
     }
-    await query('UPDATE users SET driver_lat=$1, driver_lng=$2 WHERE id=$3', [lat, lng, req.userId]);
+    const now = Date.now();
+    const recordedAt = req.body.recorded_at == null ? new Date(now) : new Date(req.body.recorded_at);
+    if (!Number.isFinite(recordedAt.getTime()) || recordedAt.getTime() > now + 60000 || recordedAt.getTime() < now - 86400000) {
+      return res.status(400).json({error: 'وقت تحديث الموقع غير صحيح'});
+    }
+    const {rows: locations} = await query(
+      `UPDATE users SET driver_lat=$1, driver_lng=$2, driver_location_updated_at=$4
+       WHERE id=$3 AND (driver_location_updated_at IS NULL OR driver_location_updated_at <= $4)
+       RETURNING driver_location_updated_at`, [lat, lng, req.userId, new Date(Math.min(recordedAt.getTime(), now))]);
+    if (!locations.length) return res.json({ok: true, ignored: true});
 
     // Push live location to the customer of any active job — سواء كان
     // طلب من متجر (orders) أو طلب هاتهالي (hataali_orders).
@@ -230,7 +240,7 @@ router.put('/location', requireAuth, requireRole('driver'), async (req, res) => 
        UNION ALL SELECT id, customer_id, 'trip' AS service FROM trips WHERE driver_id=$1 AND status IN ('accepted','picked_up')`,
       [req.userId]);
     for (const job of jobs) sendToUser?.(job.customer_id, {
-      type: 'driver_location', lat, lng, service: job.service, orderId: job.id, driverId: req.userId,
+      type: 'driver_location', lat, lng, updatedAt: locations[0].driver_location_updated_at, service: job.service, orderId: job.id, driverId: req.userId,
     });
     res.json({ ok: true });
   } catch (err) {
@@ -278,7 +288,7 @@ router.put('/orders/:id/deliver', requireAuth, requireRole('driver'), async (req
     if (!otp) return res.status(400).json({ error: 'أدخل كود التسليم اللي مع العميل' });
 
     const { rows: check } = await query(
-      `SELECT delivery_otp FROM orders WHERE id=$1 AND driver_id=$2 AND status='picked_up'`,
+      `SELECT delivery_otp,subtotal FROM orders WHERE id=$1 AND driver_id=$2 AND status='picked_up'`,
       [req.params.id, req.userId]
     );
     if (!check.length) return res.status(404).json({ error: 'الطلب غير موجود' });
@@ -286,10 +296,12 @@ router.put('/orders/:id/deliver', requireAuth, requireRole('driver'), async (req
       return res.status(400).json({ error: 'كود التسليم غير صحيح' });
     }
 
+    const {cash,merchantPaid} = collection(req.body, 'store');
+    if(merchantPaid!==null&&merchantPaid>Number(check[0].subtotal||0))return res.status(400).json({error:'المدفوع للمتجر أكبر من قيمة المنتجات'});
     const { rowCount, rows } = await query(
-      `UPDATE orders SET status='delivered', delivered_at=now()
+      `UPDATE orders SET status='delivered', delivered_at=now(),cash_collected=$3,merchant_paid=$4
        WHERE id=$1 AND driver_id=$2 AND status='picked_up' RETURNING *`,
-      [req.params.id, req.userId]
+      [req.params.id, req.userId,cash,merchantPaid]
     );
     if (!rowCount) return res.status(404).json({ error: 'الطلب غير موجود' });
 
@@ -303,6 +315,7 @@ router.put('/orders/:id/deliver', requireAuth, requireRole('driver'), async (req
 
     res.json({ ok: true });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({error:err.message});
     res.status(500).json({ error: 'فشل تأكيد التوصيل' });
   }
 });

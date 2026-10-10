@@ -1,13 +1,27 @@
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
+const { context, setAuditContext } = require('./services/requestContext');
+const { initOperationsSchema } = require('./services/operationsSchema');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: false },
 });
 
+pool.on('error', error => console.error(JSON.stringify({level:'error',code:error.code||'DATABASE_CONNECTION',source:'database'})));
+
 async function query(text, params) {
-  return pool.query(text, params);
+  const req = context.getStore();
+  if (!req?.userId || !/^\s*(INSERT|UPDATE|DELETE)\b/i.test(text)) return pool.query(text, params);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await setAuditContext(client, req);
+    const result = await client.query(text, params);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+  finally { client.release(); }
 }
 
 async function initSchema() {
@@ -37,6 +51,17 @@ async function initSchema() {
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_expires TIMESTAMPTZ`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_sent_at TIMESTAMPTZ`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code_attempts INT NOT NULL DEFAULT 0`);
+
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS driver_location_updated_at TIMESTAMPTZ`);
+  await query(`CREATE TABLE IF NOT EXISTS order_submissions (
+    user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    service TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    response JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(user_id, service, request_key)
+  )`);
 
   // ── أعمدة public_id لصور المستخدمين — Migration آمنة (IF NOT EXISTS) ─────────
   // بنحفظ public_id جنب كل رابط عشان نقدر نحذف الصورة القديمة من Cloudinary
@@ -397,6 +422,7 @@ async function initSchema() {
   await query(`CREATE INDEX IF NOT EXISTS idx_trips_status  ON trips(status)`);
 
   await ensureSettings();
+  await initOperationsSchema(query);
   await seed();
 }
 
