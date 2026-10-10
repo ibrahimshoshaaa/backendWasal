@@ -62,6 +62,18 @@ test('operations, immutable accounting, settlements, support and diagnostics',as
       assert.equal((await request(path,'PUT',at,body)).status,200);assert.equal((await request(path,'PUT',at,body)).status,409);
       assert.equal((await request(`/operations/admin/drivers/${replacement.id}/statement`,'GET',at)).body.account.balance,2);
     });
+    await t.test('legacy confirmation replaces partial supplier values and records actual errand value',async()=>{
+      const partial=(await query("INSERT INTO orders(customer_id,merchant_id,driver_id,items_json,status,subtotal,total,delivery_fee,merchant_paid) VALUES($1,$2,$3,'[]','delivered',100,110,10,50) RETURNING id",[customer.id,merchant.id,replacement.id])).rows[0];
+      const oldErrand=(await query("INSERT INTO hataali_orders(customer_id,driver_id,title,status,delivery_fee,approx_price) VALUES($1,$2,'Legacy purchase','delivered',35,999) RETURNING id",[customer.id,replacement.id])).rows[0];
+      const entries=(await request(`/operations/admin/drivers/${replacement.id}/statement`,'GET',at)).body.entries;
+      for(const [service,job,body] of [['store',partial,{cash_collected:110,merchant_paid:100,reason:'Actual supplier payment'}],['hataali',oldErrand,{cash_collected:135,purchase_cost:100,reason:'Actual receipt checked'}]]) {
+        const entry=entries.find(e=>e.service===service&&e.job_id===job.id);
+        const result=await request(`/operations/admin/drivers/${replacement.id}/ledger/${entry.id}/confirm`,'PUT',at,body);assert.equal(result.status,200,JSON.stringify(result.body));
+      }
+      const after=(await request(`/operations/admin/drivers/${replacement.id}/statement`,'GET',at)).body;
+      assert.equal(Number(after.entries.find(e=>e.service==='store'&&e.job_id===partial.id).merchant_due),0);
+      assert.equal(Number(after.entries.find(e=>e.service==='hataali'&&e.job_id===oldErrand.id).order_value),135);
+    });
     await t.test('reassignment is compare-and-swap and is respected by all driver acceptance routes',async()=>{
       for(const [service,table,status,fields,values] of [['trip','trips','pending',"type,pickup_address,dropoff_address","'wassalni','A','B'"],['hataali','hataali_orders','approved','title',"'Assigned errand'"],['store','orders','ready','merchant_id,items_json',`${merchant.id},'[]'`]]) {
         const job=(await query(`INSERT INTO ${table}(customer_id,status,${fields}) VALUES($1,$2,${values}) RETURNING *`,[customer.id,status])).rows[0];

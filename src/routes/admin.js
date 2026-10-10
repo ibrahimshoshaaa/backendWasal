@@ -285,6 +285,7 @@ router.put('/orders/:id/status', async (req, res) => {
 
     res.json({ ok: true });
   } catch (err) {
+    if(err.code==='23514')return res.status(409).json({error:'الطلب انتهى ومينفعش تغيير حالته'});
     console.error('PUT /admin/orders/:id/status error:', err);
     res.status(500).json({ error: 'فشل تحديث حالة الطلب' });
   }
