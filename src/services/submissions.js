@@ -1,8 +1,9 @@
 const { createHash } = require('node:crypto');
+const { setAuditContext } = require('./requestContext');
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])]));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'variant' }) || (a < b ? -1 : a > b ? 1 : 0)).map(k => [k, canonical(value[k])]));
   return value;
 }
 
@@ -33,4 +34,18 @@ async function completeSubmission(client, submission, response) {
     [submission.userId, submission.service, submission.key, submission.hash, JSON.stringify(response)]);
 }
 
-module.exports = { beginSubmission, completeSubmission };
+async function prepareSubmission(client, req, service, lockCustomer = false) {
+  await client.query('BEGIN');
+  await setAuditContext(client, req);
+  if (lockCustomer) await client.query('SELECT pg_advisory_xact_lock($1)', [req.userId]);
+  return beginSubmission(client, req, service);
+}
+
+async function commitSubmission(client, submission, response) {
+  await completeSubmission(client, submission, response);
+  await client.query('COMMIT');
+  client.release();
+  return response;
+}
+
+module.exports = { prepareSubmission, commitSubmission };

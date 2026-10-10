@@ -1,8 +1,7 @@
 const express = require('express');
 const { collection } = require('../services/finance');
-const { setAuditContext } = require('../services/requestContext');
 const { pool, query, createNotification } = require('../db');
-const { beginSubmission, completeSubmission } = require('../services/submissions');
+const { prepareSubmission, commitSubmission } = require('../services/submissions');
 const router = express.Router();
 
 // ─── helpers ────────────────────────────────────────────────────────────────────
@@ -28,7 +27,7 @@ router.get('/settings', async (req, res) => {
       `SELECT key, value FROM app_settings WHERE key IN ('wassalni_price','wassal_li_price')`
     );
     const out = {};
-    rows.forEach(r => { out[r.key] = parseFloat(r.value); });
+    rows.forEach(r => { out[r.key] = Number.parseFloat(r.value); });
     res.json(out);
   } catch (err) {
     console.error(err);
@@ -53,16 +52,14 @@ router.post('/', async (req, res) => {
     const finalGender = ['male', 'female'].includes(preferred_gender) ? preferred_gender : null;
 
     client = await pool.connect();
-    await client.query('BEGIN');
-    await setAuditContext(client, req);
-    const submission = await beginSubmission(client, req, 'trip');
+    const submission = await prepareSubmission(client, req, 'trip');
     if (submission?.response) {
       await client.query('COMMIT');
       return res.json(submission.response);
     }
 
     const { rows: prices } = await client.query('SELECT value FROM app_settings WHERE key=$1', [type === 'wassalni' ? 'wassalni_price' : 'wassal_li_price']);
-    const price = parseFloat(prices[0]?.value || '50');
+    const price = Number.parseFloat(prices[0]?.value || '50');
 
     const { rows } = await client.query(
       `INSERT INTO trips
@@ -74,10 +71,7 @@ router.post('/', async (req, res) => {
        notes || null, price, finalGender]
     );
 
-    await completeSubmission(client, submission, rows[0]);
-    await client.query('COMMIT');
-    created = rows[0];
-    client.release();
+    created = await commitSubmission(client, submission, rows[0]);
     client = null;
 
     const label = type === 'wassalni' ? 'وصّلني' : 'وصّل لي';

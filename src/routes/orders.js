@@ -1,12 +1,11 @@
 const express = require('express');
-const { setAuditContext } = require('../services/requestContext');
 const { pool, query, createNotification } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { checkCancelRate, checkNewOrderSignals } = require('../services/fraud');
 const { isMerchantOpenNow } = require('../services/merchantHours');
 const { resolveOptions, storedSelections } = require('../services/options');
 
-const { beginSubmission, completeSubmission } = require('../services/submissions');
+const { prepareSubmission, commitSubmission } = require('../services/submissions');
 
 const router = express.Router();
 
@@ -34,10 +33,7 @@ router.post('/', requireAuth, async (req, res) => {
 
   try {
     client = await pool.connect();
-    await client.query('BEGIN');
-    await setAuditContext(client, req);
-    await client.query('SELECT pg_advisory_xact_lock($1)', [req.userId]);
-    const submission = await beginSubmission(client, req, 'store');
+    const submission = await prepareSubmission(client, req, 'store', true);
     if (submission?.response) {
       await client.query('COMMIT');
       return res.json(submission.response);
@@ -120,8 +116,8 @@ router.post('/', requireAuth, async (req, res) => {
     merchantOwnerId = merchant.owner_user_id;
     await client.query('DELETE FROM cart_items WHERE user_id=$1 AND id=ANY($2)',
       [req.userId, cartLines.map(line => line.id)]);
-    await completeSubmission(client, submission, order);
-    await client.query('COMMIT');
+    await commitSubmission(client, submission, order);
+    client = null;
   } catch (err) {
     if (client) await client.query('ROLLBACK').catch(() => {});
     if (err.status) return res.status(err.status).json({ error: err.message });

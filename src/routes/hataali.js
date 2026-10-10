@@ -1,8 +1,7 @@
 const express = require('express');
 const { collection } = require('../services/finance');
-const { setAuditContext } = require('../services/requestContext');
 const { pool, query, notifyOnlineDrivers, createNotification } = require('../db');
-const { beginSubmission, completeSubmission } = require('../services/submissions');
+const { prepareSubmission, commitSubmission } = require('../services/submissions');
 const router = express.Router();
 
 // ─── Customer ─────────────────────────────────────────────────────────────────
@@ -16,9 +15,7 @@ router.post('/', async (req, res) => {
     if (!title) return res.status(400).json({ error: 'اسم الطلب مطلوب' });
 
     client = await pool.connect();
-    await client.query('BEGIN');
-    await setAuditContext(client, req);
-    const submission = await beginSubmission(client, req, 'hataali');
+    const submission = await prepareSubmission(client, req, 'hataali');
     if (submission?.response) {
       await client.query('COMMIT');
       return res.json(submission.response);
@@ -26,7 +23,7 @@ router.post('/', async (req, res) => {
 
     // جلب رسوم التوصيل من الإعدادات
     const { rows: feeRows } = await client.query(`SELECT value FROM app_settings WHERE key='hataali_fee'`);
-    const fee = parseFloat(feeRows[0]?.value || '35');
+    const fee = Number.parseFloat(feeRows[0]?.value || '35');
 
     const { rows } = await client.query(
       `INSERT INTO hataali_orders
@@ -37,10 +34,7 @@ router.post('/', async (req, res) => {
        lat || null, lng || null]
     );
 
-    await completeSubmission(client, submission, rows[0]);
-    await client.query('COMMIT');
-    created = rows[0];
-    client.release();
+    created = await commitSubmission(client, submission, rows[0]);
     client = null;
 
     // إشعار للأدمن
@@ -282,7 +276,7 @@ router.put('/admin/:id', async (req, res) => {
 router.get('/settings', async (req, res) => {
   try {
     const { rows } = await query(`SELECT value FROM app_settings WHERE key='hataali_fee'`);
-    res.json({ hataali_fee: parseFloat(rows[0]?.value || '35') });
+    res.json({ hataali_fee: Number.parseFloat(rows[0]?.value || '35') });
   } catch (err) {
     console.error('GET /hataali/settings error:', err);
     res.status(500).json({ error: 'تعذر تحميل الإعدادات' });
@@ -297,7 +291,7 @@ router.put('/settings', async (req, res) => {
     if (!hataali_fee || isNaN(hataali_fee)) return res.status(400).json({ error: 'رسوم غير صحيحة' });
     await query(`INSERT INTO app_settings (key,value) VALUES ('hataali_fee',$1)
                  ON CONFLICT (key) DO UPDATE SET value=$1`, [String(hataali_fee)]);
-    res.json({ hataali_fee: parseFloat(hataali_fee) });
+    res.json({ hataali_fee: Number.parseFloat(hataali_fee) });
   } catch (err) {
     console.error('PUT /hataali/settings error:', err);
     res.status(500).json({ error: 'تعذر تحديث الإعدادات' });
