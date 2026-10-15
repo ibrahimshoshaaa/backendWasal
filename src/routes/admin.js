@@ -421,16 +421,16 @@ router.delete('/option-groups/:groupId', async (req, res) => {
 
 router.post('/option-groups/:groupId/choices', async (req, res) => {
   try {
-    const { name, extra_price, total_price, sort_order } = req.body || {};
+    const { name, extra_price, total_price, sort_order, image_url } = req.body || {};
     const {rows: priceGroups} = await query('SELECT pricing_mode FROM option_groups WHERE id=$1', [req.params.groupId]);
     const priceError = validateChoicePrice(req.body, priceGroups[0]?.pricing_mode);
     if (priceError) return res.status(400).json({error: priceError});
 
     if (!name) return res.status(400).json({ error: 'اسم الاختيار مطلوب' });
     const { rows } = await query(
-      `INSERT INTO option_choices (group_id, name, extra_price, sort_order, total_price)
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [req.params.groupId, name, extra_price || 0, sort_order || 0, priceGroups[0]?.pricing_mode === 'absolute' ? total_price : null]
+      `INSERT INTO option_choices (group_id, name, extra_price, sort_order, total_price, image_url)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [req.params.groupId, name, extra_price || 0, sort_order || 0, priceGroups[0]?.pricing_mode === 'absolute' ? total_price : null, image_url || null]
     );
     res.json(rows[0]);
   } catch (err) {
@@ -441,7 +441,7 @@ router.post('/option-groups/:groupId/choices', async (req, res) => {
 router.put('/option-choices/:choiceId', async (req, res) => {
   try {
     if (req.body.total_price !== undefined && (req.body.total_price === null || !Number.isFinite(Number(req.body.total_price)) || Number(req.body.total_price) < 0)) return res.status(400).json({error:'سعر الحجم غير صحيح'});
-    const fields = ['name', 'total_price', 'extra_price', 'is_available', 'sort_order'];
+    const fields = ['name', 'total_price', 'extra_price', 'is_available', 'sort_order', 'image_url'];
     const updates = [];
     const params = [];
     for (const f of fields) {
