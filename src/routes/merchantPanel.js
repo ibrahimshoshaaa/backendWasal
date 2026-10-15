@@ -1,3 +1,4 @@
+const { createSizeGroup, validateChoicePrice } = require('../services/sizePricing');
 const express = require('express');
 const { query, createNotification, notifyOnlineDrivers } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
@@ -463,6 +464,10 @@ router.post('/products/:id/options', requireAuth, requireRole('merchant'), async
     if (!merchantId || !(await assertOwnsProduct(merchantId, req.params.id))) {
       return res.status(404).json({ error: 'المنتج غير موجود' });
     }
+    if (req.body?.pricing_mode === 'absolute') {
+      try { return res.json(await createSizeGroup(req.params.id, req.body)); }
+      catch (e) { return res.status(e.status || (e.code === '23505' ? 409 : 500)).json({error: e.status ? e.message : 'تعذر حفظ الأحجام؛ تأكد من عدم وجود مجموعة أحجام بالفعل'}); }
+    }
     const { name, is_required, min_select, max_select, sort_order } = req.body || {};
     if (!name) return res.status(400).json({ error: 'اسم المجموعة مطلوب' });
     const { rows } = await query(
@@ -487,6 +492,10 @@ router.put('/option-groups/:groupId', requireAuth, requireRole('merchant'), asyn
     );
     if (!check.length) return res.status(404).json({ error: 'المجموعة غير موجودة' });
 
+    const {rows: modes} = await query('SELECT pricing_mode FROM option_groups WHERE id=$1', [req.params.groupId]);
+    if (modes[0]?.pricing_mode === 'absolute') {
+      req.body = {...req.body, is_required:true, min_select:1, max_select:1};
+    }
     const fields = ['name', 'is_required', 'min_select', 'max_select', 'sort_order'];
     const updates = [];
     const params = [];
@@ -539,12 +548,16 @@ router.post(
       );
       if (!check.length) return res.status(404).json({ error: 'المجموعة غير موجودة' });
 
-      const { name, extra_price, sort_order, image_url } = req.body || {};
+      const { name, extra_price, total_price, sort_order, image_url } = req.body || {};
+    const {rows: priceGroups} = await query('SELECT pricing_mode FROM option_groups WHERE id=$1', [req.params.groupId]);
+    const priceError = validateChoicePrice(req.body, priceGroups[0]?.pricing_mode);
+    if (priceError) return res.status(400).json({error: priceError});
+
       if (!name) return res.status(400).json({ error: 'اسم الاختيار مطلوب' });
       const { rows } = await query(
-        `INSERT INTO option_choices (group_id, name, extra_price, sort_order, image_url)
-         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-        [req.params.groupId, name, extra_price || 0, sort_order || 0, image_url || null]
+        `INSERT INTO option_choices (group_id, name, extra_price, sort_order, image_url, total_price)
+         VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+        [req.params.groupId, name, extra_price || 0, sort_order || 0, image_url || null, priceGroups[0]?.pricing_mode === 'absolute' ? total_price : null]
       );
       res.json(rows[0]);
     } catch (err) {
@@ -566,7 +579,8 @@ router.put('/option-choices/:choiceId', requireAuth, requireRole('merchant'), as
     );
     if (!check.length) return res.status(404).json({ error: 'الاختيار غير موجود' });
 
-    const fields = ['name', 'extra_price', 'is_available', 'sort_order', 'image_url'];
+    if (req.body.total_price !== undefined && (req.body.total_price === null || !Number.isFinite(Number(req.body.total_price)) || Number(req.body.total_price) < 0)) return res.status(400).json({error:'سعر الحجم غير صحيح'});
+    const fields = ['name', 'total_price', 'extra_price', 'is_available', 'sort_order', 'image_url'];
     const updates = [];
     const params = [];
     for (const f of fields) {
@@ -609,3 +623,4 @@ router.delete(
 );
 
 module.exports = router;
+

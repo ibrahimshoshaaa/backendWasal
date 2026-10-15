@@ -1,5 +1,5 @@
 function invalid(message) { throw Object.assign(new Error(message), { status: 400 }); }
-async function resolveOptions(dbQuery, productId, selections = []) {
+async function resolveOptions(dbQuery, productId, selections = [], basePrice = 0) {
   if (!Array.isArray(selections)) invalid('اختيارات المنتج غير صحيحة');
   const { rows: groups } = await dbQuery('SELECT * FROM option_groups WHERE product_id=$1', [productId]);
   const { rows: choices } = await dbQuery(
@@ -20,10 +20,15 @@ async function resolveOptions(dbQuery, productId, selections = []) {
     for (const id of ids) {
       const choice = choices.find(c => c.id === id && c.group_id === group.id && c.is_available);
       if (!choice || !Number.isFinite(Number(choice.extra_price)) || Number(choice.extra_price) < 0) invalid('أحد اختيارات المنتج لم يعد متاحاً');
-      resolved.push({ choice_id: choice.id, name: choice.name, group_id: group.id, group_name: group.name, extra_price: Number(choice.extra_price) });
+      if (group.pricing_mode === 'absolute' && (choice.total_price == null || !Number.isFinite(Number(choice.total_price)) || Number(choice.total_price) < 0)) invalid('سعر الحجم غير صحيح');
+      resolved.push({ ...(group.pricing_mode === 'absolute' ? {total_price: Number(choice.total_price)} : {}), choice_id: choice.id, name: choice.name, group_id: group.id, group_name: group.name, extra_price: group.pricing_mode === 'absolute' ? 0 : Number(choice.extra_price) });
     }
   }
-  return { resolved, extra: resolved.reduce((sum, c) => sum + c.extra_price, 0), hash: resolved.map(c => c.choice_id).sort((a, b) => a - b).join('-') };
+  const sizes = resolved.filter(c => c.total_price != null);
+  if (sizes.length > 1) invalid('اختر حجماً واحداً فقط');
+  const extra = resolved.reduce((sum, c) => sum + c.extra_price, 0)
+    + (sizes.length ? sizes[0].total_price - Number(basePrice) : 0);
+  return { resolved, extra, hash: resolved.map(c => c.choice_id).sort((a, b) => a - b).join('-') };
 }
 function storedSelections(options) {
   const groups = new Map();
@@ -34,3 +39,4 @@ function storedSelections(options) {
   return Array.from(groups, ([group_id, choice_ids]) => ({ group_id, choice_ids }));
 }
 module.exports = { resolveOptions, storedSelections };
+

@@ -25,7 +25,10 @@ async function buildCartResponse(userId) {
   );
 
   const items = rows.map((r) => {
-    const unitPrice = Number(r.price) + Number(r.unit_extra || 0);
+    const sizes = (r.selected_options || []).filter(c => c.total_price != null);
+    const unitPrice = sizes.length
+      ? Number(sizes[0].total_price) + (r.selected_options || []).reduce((sum,c) => sum + Number(c.extra_price || 0), 0)
+      : Number(r.price) + Number(r.unit_extra || 0);
     return {
       id: r.id,
       product_id: r.product_id,
@@ -81,7 +84,7 @@ router.post('/', requireAuth, async (req, res) => {
     const { rows } = await client.query('SELECT * FROM products WHERE id=$1', [product_id]);
     const product = rows[0];
     if (!product || !product.is_available) throw Object.assign(new Error('المنتج غير متاح'), { status: 400 });
-    const options = await resolveOptions(client.query.bind(client), product.id, selected_options);
+    const options = await resolveOptions(client.query.bind(client), product.id, selected_options, product.price);
     const { rows: existing } = await client.query(
       `SELECT DISTINCT p.merchant_id FROM cart_items ci JOIN products p ON p.id=ci.product_id WHERE ci.user_id=$1`, [req.userId]);
     if (existing.some(line => line.merchant_id !== product.merchant_id)) await client.query('DELETE FROM cart_items WHERE user_id=$1', [req.userId]);
@@ -149,4 +152,5 @@ router.delete('/', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+
 
