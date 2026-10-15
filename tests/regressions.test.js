@@ -156,6 +156,29 @@ test('security, checkout pricing, OTP privacy and service accounting', async t =
       assert.equal((await request('/driver/location','PUT',dt,{lat:30,lng:31,recorded_at:'invalid'})).status,400);
       assert.equal((await request('/driver/location','PUT',dt,{lat:30,lng:31,recorded_at:new Date(Date.now()+120000).toISOString()})).status,400);
     });
+    await t.test('full size prices persist through cart and checkout without adding the base twice', async()=>{
+      const buyer=await user('customer'), token=signToken(buyer);
+      const meal=(await query("INSERT INTO products(merchant_id,name,price) VALUES($1,'Sized meal',100) RETURNING id",[merchant.id])).rows[0];
+      const home=(await query("INSERT INTO addresses(user_id,label,address_text) VALUES($1,'Home','Street') RETURNING id",[buyer.id])).rows[0];
+      const endpoint=`/admin/merchants/${merchant.id}/products/${meal.id}/options`;
+      assert.equal((await request(endpoint,'POST',at,{pricing_mode:'absolute',choices:[{name:'Bad',total_price:-1}]})).status,400);
+      const sizes=await request(endpoint,'POST',at,{pricing_mode:'absolute',choices:[{name:'Large',total_price:120},{name:'Small',total_price:80}]});
+      assert.equal(sizes.status,200,JSON.stringify(sizes.body));
+      assert.equal(sizes.body.max_select,1);
+      const select=[{group_id:sizes.body.id,choice_ids:[sizes.body.choices[0].id]}];
+      assert.equal((await request('/cart','POST',token,{product_id:meal.id,quantity:1})).status,400);
+      const cart=await request('/cart','POST',token,{product_id:meal.id,quantity:1,selected_options:select});
+      assert.equal(cart.status,200,JSON.stringify(cart.body)); assert.equal(cart.body.total,120);
+      await query('UPDATE products SET price=150 WHERE id=$1',[meal.id]);
+      assert.equal((await request('/cart','GET',token)).body.total,120);
+      const order=await request('/orders','POST',token,{merchant_id:merchant.id,address_id:home.id});
+      assert.equal(order.status,200,JSON.stringify(order.body));assert.equal(Number(order.body.total),135);
+      const small=await request('/cart','POST',token,{product_id:meal.id,quantity:2,selected_options:[{group_id:sizes.body.id,choice_ids:[sizes.body.choices[1].id]}]});
+      assert.equal(small.body.total,160);
+      const mt=signToken(merchantUser);
+      assert.equal((await request(`/merchant/option-groups/${sizes.body.id}/choices`,'POST',mt,{name:'Family',total_price:200})).status,200);
+      assert.equal((await request(`/merchant/option-groups/${sizes.body.id}/choices`,'POST',mt,{name:'Bad',total_price:-10})).status,400);
+    });
     await t.test('suspension blocks an already issued token',async()=>{
       assert.equal((await request(`/admin/drivers/${driver.id}/status`,'PUT',at,{status:'suspended'})).status,200);
       assert.equal((await request('/driver/orders','GET',dt)).status,401);
@@ -177,3 +200,4 @@ test('security, checkout pricing, OTP privacy and service accounting', async t =
     });
   } finally { server.kill(); await pool.end(); }
 });
+

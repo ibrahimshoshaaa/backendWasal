@@ -201,6 +201,10 @@ async function initSchema() {
 
   // صورة اختيارية لكل اختيار (مثلاً صورة توضح "حجم كبير" أو "طبق إضافي")
   await query(`ALTER TABLE option_choices ADD COLUMN IF NOT EXISTS image_url TEXT`);
+  await query(`ALTER TABLE option_groups ADD COLUMN IF NOT EXISTS pricing_mode TEXT NOT NULL DEFAULT 'extra'`);
+  await query(`ALTER TABLE option_choices ADD COLUMN IF NOT EXISTS total_price NUMERIC(10,2) CHECK (total_price >= 0)`);
+  await query(`CREATE UNIQUE INDEX IF NOT EXISTS one_size_group_per_product ON option_groups(product_id) WHERE pricing_mode='absolute'`);
+
 
   await query(`
     CREATE TABLE IF NOT EXISTS addresses (
@@ -533,4 +537,5 @@ async function ensureSettings() {
     ON CONFLICT (key) DO NOTHING
   `);
 }
+
 

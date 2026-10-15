@@ -71,10 +71,10 @@ router.post('/', requireAuth, async (req, res) => {
 
     const items = [];
     for (const line of cartLines) {
-      const options = await resolveOptions(client.query.bind(client), line.product_id, storedSelections(line.selected_options));
+      const options = await resolveOptions(client.query.bind(client), line.product_id, storedSelections(line.selected_options), line.price);
       const price = Number(line.price);
       const extra = options.extra;
-      if (!Number.isFinite(price) || !Number.isFinite(extra) || price < 0 || extra < 0) {
+      if (!Number.isFinite(price) || !Number.isFinite(extra) || price < 0 || price + extra < 0) {
         fail(400, 'سعر أحد المنتجات غير صحيح');
       }
       const unitPrice = price + extra;
@@ -321,4 +321,5 @@ router.post('/:id/rate', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+
 
