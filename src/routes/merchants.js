@@ -59,7 +59,9 @@ router.get('/:id', async (req, res) => {
         choices = c;
       }
       for (const g of groups) {
-        g.choices = choices.filter((c) => c.group_id === g.id);
+        const base = Number(products.find(p => p.id === g.product_id)?.price || 0);
+        g.choices = choices.filter((c) => c.group_id === g.id).map(c =>
+          g.pricing_mode === 'absolute' ? {...c, extra_price: Number(c.total_price) - base} : c);
         (optionsByProduct[g.product_id] ||= []).push(g);
       }
     }
@@ -116,3 +118,4 @@ router.put('/:id', requireAuth, requireRole('admin'), async (req, res) => {
 });
 
 module.exports = router;
+

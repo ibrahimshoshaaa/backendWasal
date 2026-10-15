@@ -492,6 +492,10 @@ router.put('/option-groups/:groupId', requireAuth, requireRole('merchant'), asyn
     );
     if (!check.length) return res.status(404).json({ error: 'المجموعة غير موجودة' });
 
+    const {rows: modes} = await query('SELECT pricing_mode FROM option_groups WHERE id=$1', [req.params.groupId]);
+    if (modes[0]?.pricing_mode === 'absolute') {
+      req.body = {...req.body, is_required:true, min_select:1, max_select:1};
+    }
     const fields = ['name', 'is_required', 'min_select', 'max_select', 'sort_order'];
     const updates = [];
     const params = [];
