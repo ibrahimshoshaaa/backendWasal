@@ -175,6 +175,10 @@ test('security, checkout pricing, OTP privacy and service accounting', async t =
       assert.equal(order.status,200,JSON.stringify(order.body));assert.equal(Number(order.body.total),135);
       const small=await request('/cart','POST',token,{product_id:meal.id,quantity:2,selected_options:[{group_id:sizes.body.id,choice_ids:[sizes.body.choices[1].id]}]});
       assert.equal(small.body.total,160);
+      const pictured=await request(`/admin/option-groups/${sizes.body.id}/choices`,'POST',at,{name:'Family image',total_price:210,image_url:'https://example.test/size.jpg'});
+      assert.equal(pictured.status,200);assert.equal(pictured.body.image_url,'https://example.test/size.jpg');
+      const edited=await request(`/admin/option-choices/${pictured.body.id}`,'PUT',at,{image_url:'https://example.test/size-2.jpg'});
+      assert.equal(edited.body.image_url,'https://example.test/size-2.jpg');
       const mt=signToken(merchantUser);
       assert.equal((await request(`/merchant/option-groups/${sizes.body.id}/choices`,'POST',mt,{name:'Family',total_price:200})).status,200);
       assert.equal((await request(`/merchant/option-groups/${sizes.body.id}/choices`,'POST',mt,{name:'Bad',total_price:-10})).status,400);
