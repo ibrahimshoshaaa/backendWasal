@@ -183,6 +183,71 @@ test('security, checkout pricing, OTP privacy and service accounting', async t =
       assert.equal((await request(`/merchant/option-groups/${sizes.body.id}/choices`,'POST',mt,{name:'Family',total_price:200})).status,200);
       assert.equal((await request(`/merchant/option-groups/${sizes.body.id}/choices`,'POST',mt,{name:'Bad',total_price:-10})).status,400);
     });
+    await t.test('offline drivers cannot receive, accept or be assigned new jobs in any service', async()=>{
+      const courier=await user('driver'), token=signToken(courier);
+      const jobs=[];
+      for (const [service,table,status,fields,values,list] of [
+        ['store','orders','ready','merchant_id,items_json',`${merchant.id},'[]'`,'/driver/orders'],
+        ['trip','trips','pending','type,pickup_address,dropoff_address',"'wassalni','A','B'",'/trips/driver/available'],
+        ['hataali','hataali_orders','approved','title',"'Availability errand'",'/hataali/available']]) {
+        const job=(await query(`INSERT INTO ${table}(customer_id,status,${fields}) VALUES($1,$2,${values}) RETURNING id`,[customer.id,status])).rows[0];
+        jobs.push({service,table,status,list,id:job.id,accept:service==='store'?`/driver/orders/${job.id}/accept`:`/${service==='trip'?'trips':'hataali'}/${job.id}/accept`,method:service==='store'?'PUT':'POST'});
+      }
+      assert.equal((await request('/driver/status','PUT',token,{is_online:'false'})).status,400);
+      assert.equal((await request('/driver/status','PUT',token,{is_online:false})).status,200);
+      for (const job of jobs) {
+        const listed=await request(job.list,'GET',token);assert.equal(listed.status,200);assert.deepEqual(listed.body,[]);
+        assert.notEqual((await request(job.accept,job.method,token)).status,200);
+        assert.notEqual((await request(`/operations/admin/jobs/${job.service}/${job.id}/driver`,'PUT',at,{driver_id:courier.id,expected_driver_id:null,expected_status:job.status,reason:'Offline driver test'})).status,200);
+        assert.equal((await query(`SELECT driver_id FROM ${job.table} WHERE id=$1`,[job.id])).rows[0].driver_id,null);
+      }
+      assert.notEqual((await request(`/admin/orders/${jobs[0].id}/driver`,'PUT',at,{driver_id:courier.id})).status,200);
+      const {createNotification}=require('../src/db');
+      await createNotification(courier.id,{title:'Offline offer',body:'Ignored',type:'new_trip'});
+      assert.equal(Number((await query('SELECT count(*) FROM notifications WHERE user_id=$1',[courier.id])).rows[0].count),0);
+      await request('/driver/status','PUT',token,{is_online:true});
+      for (const job of jobs) {
+        assert.ok((await request(job.list,'GET',token)).body.some(j=>j.id===job.id));
+        assert.equal((await request(job.accept,job.method,token)).status,200);
+      }
+      await request('/driver/status','PUT',token,{is_online:false});
+      assert.ok((await request('/driver/orders','GET',token)).body.some(j=>j.id===jobs[0].id));
+      assert.ok((await request('/trips/driver/my-trips','GET',token)).body.some(j=>j.id===jobs[1].id));
+      const order=(await query('SELECT delivery_otp FROM orders WHERE id=$1',[jobs[0].id])).rows[0];
+      assert.equal((await request(`/driver/orders/${jobs[0].id}/deliver`,'PUT',token,{otp:order.delivery_otp})).status,200);
+    });
+    await t.test('driver ratings cover both trip types and errands, enforce ownership and update aggregate once',async()=>{
+      const courier=await user('driver'), token=signToken(courier), other=signToken(await user('customer'));
+      for (const [table,path,type] of [['trips','trips','wassalni'],['trips','trips','wassal_li'],['hataali_orders','hataali',null]]) {
+        const fields=type?'type,pickup_address,dropoff_address':'title';
+        const values=type?`'${type}','A','B'`:"'Rating errand'";
+        const job=(await query(`INSERT INTO ${table}(customer_id,driver_id,status,${fields}) VALUES($1,$2,'picked_up',${values}) RETURNING id`,[customer.id,courier.id])).rows[0];
+        const endpoint=`/${path}/${job.id}/driver-rating`;
+        assert.equal((await request(endpoint,'POST',ct,{rating:5})).status,409);
+        await query(`UPDATE ${table} SET status='delivered' WHERE id=$1`,[job.id]);
+        assert.equal((await request(endpoint,'POST',other,{rating:5})).status,409);
+        assert.equal((await request(endpoint,'POST',token,{rating:5})).status,403);
+        for(const rating of [0,6,2.5,'5'])assert.equal((await request(endpoint,'POST',ct,{rating})).status,400);
+        assert.equal((await request(endpoint,'POST',ct,{rating:5,comment:'x'.repeat(1001)})).status,400);
+        const results=await Promise.all([request(endpoint,'POST',ct,{rating:4,comment:' Good '}),request(endpoint,'POST',ct,{rating:4})]);
+        assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);
+        assert.equal((await query(`SELECT driver_rating FROM ${table} WHERE id=$1`,[job.id])).rows[0].driver_rating,4);
+      }
+      await query("INSERT INTO orders(customer_id,merchant_id,driver_id,items_json,status,driver_rating) VALUES($1,$2,$3,'[]','delivered',2)",[customer.id,merchant.id,courier.id]);
+      const rating=await request('/driver/rating','GET',token);assert.equal(rating.status,200);assert.equal(rating.body.rating_count,4);assert.equal(rating.body.avg_rating,3.5);
+      const feedback=await request('/driver/ratings','GET',token);assert.equal(feedback.body.length,4);assert.deepEqual([...new Set(feedback.body.map(r=>r.service))].sort(),['hataali','store','trip']);
+    });
+    await t.test('logout detaches only this account token and disables driver availability',async()=>{
+      const courier=await user('driver'), token=signToken(courier), device=`device-${courier.id}`;
+      assert.equal((await request('/devices/token','POST',token,{token:device,session_filtered:true})).status,200);
+      assert.equal((await query('SELECT session_filtered FROM device_tokens WHERE token=$1',[device])).rows[0].session_filtered,true);
+      assert.equal((await request('/devices/token','POST',ct,{token:device+'other'})).status,200);
+      assert.equal((await request('/devices/logout','POST',token,{token:device+'other'})).status,200);
+      assert.equal((await query('SELECT user_id FROM device_tokens WHERE token=$1',[device+'other'])).rows[0].user_id,customer.id);
+      assert.equal((await request('/devices/logout','POST',token,{token:device})).status,200);
+      assert.equal((await query('SELECT 1 FROM device_tokens WHERE token=$1',[device])).rows.length,0);
+      assert.equal((await query('SELECT is_online FROM users WHERE id=$1',[courier.id])).rows[0].is_online,false);
+    });
     await t.test('suspension blocks an already issued token',async()=>{
       assert.equal((await request(`/admin/drivers/${driver.id}/status`,'PUT',at,{status:'suspended'})).status,200);
       assert.equal((await request('/driver/orders','GET',dt)).status,401);

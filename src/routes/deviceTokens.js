@@ -10,17 +10,17 @@ const router = express.Router();
 
 // POST /api/devices/token — تسجيل/تحديث توكن الجهاز للمستخدم الحالي
 router.post('/token', requireAuth, async (req, res) => {
-  const { token, platform } = req.body || {};
+  const { token, platform, session_filtered } = req.body || {};
   if (!token || typeof token !== 'string') {
     return res.status(400).json({ error: 'التوكن مطلوب' });
   }
   try {
     await query(
-      `INSERT INTO device_tokens (user_id, token, platform)
-       VALUES ($1, $2, $3)
+      `INSERT INTO device_tokens (user_id, token, platform, session_filtered)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (token) DO UPDATE
-         SET user_id = EXCLUDED.user_id, platform = EXCLUDED.platform`,
-      [req.userId, token, platform || 'android']
+         SET user_id = EXCLUDED.user_id, platform = EXCLUDED.platform, session_filtered = EXCLUDED.session_filtered`,
+      [req.userId, token, platform || 'android', session_filtered === true]
     );
 
     // سجل تاريخي (append-only) — عشان نظام مكافحة الطلبات الوهمية يقدر يكتشف
@@ -57,4 +57,13 @@ router.delete('/token', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Detach this installation and stop new job reception when a driver signs out.
+router.post('/logout', requireAuth, async (req,res) => {
+  try {
+    if (req.userRole === 'driver') await query('UPDATE users SET is_online=false WHERE id=$1',[req.userId]);
+    if (typeof req.body?.token === 'string') await query('DELETE FROM device_tokens WHERE user_id=$1 AND token=$2',[req.userId,req.body.token]);
+    res.json({ok:true});
+  } catch (_) { res.status(500).json({error:'تعذر فصل إشعارات الجهاز'}); }
+});
 module.exports = router;
+

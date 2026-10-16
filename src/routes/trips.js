@@ -1,3 +1,4 @@
+const { rateDriver } = require('../services/driverFeedback');
 const express = require('express');
 const { collection } = require('../services/finance');
 const { pool, query, createNotification } = require('../db');
@@ -17,6 +18,8 @@ async function notifyAdmins(req, title, body, type) {
   const { rows: admins } = await query(`SELECT id FROM users WHERE role='admin'`);
   for (const a of admins) notify(req, a.id, { title, body, type });
 }
+
+router.post('/:id/driver-rating', rateDriver('trips'));
 
 // ─── Customer ───────────────────────────────────────────────────────────────────
 
@@ -95,7 +98,7 @@ router.post('/', async (req, res) => {
       notify(req, d.id, {
         title: `طلب ${label} جديد${genderNote}`,
         body: `من: ${pickup_address} — إلى: ${dropoff_address}`,
-        type: 'trip',
+        type: 'new_trip',
       });
       if (sendToUser) sendToUser(d.id, { type: 'new_trip', trip: rows[0] });
     }
@@ -193,6 +196,7 @@ router.get('/driver/available', async (req, res) => {
        FROM trips t
        JOIN users c ON c.id = t.customer_id
        WHERE t.status='pending' AND (t.driver_id IS NULL OR t.driver_id=$2)
+         AND EXISTS (SELECT 1 FROM users d WHERE d.id=$2 AND d.is_online=true)
          AND (t.preferred_gender IS NULL OR t.preferred_gender = $1)
        ORDER BY t.created_at DESC`,
       [myGender,req.userId]
@@ -234,6 +238,7 @@ router.post('/:id/accept', async (req, res) => {
     const { rows } = await query(
       `UPDATE trips SET driver_id=$1, status='accepted', updated_at=now(), delivery_otp=$4
        WHERE id=$2 AND status='pending' AND (driver_id IS NULL OR driver_id=$1)
+         AND EXISTS (SELECT 1 FROM users d WHERE d.id=$1 AND d.is_online=true AND d.driver_status='active')
          AND (preferred_gender IS NULL OR preferred_gender=$3)
        RETURNING *`,
       [req.userId, req.params.id, myGender, otp]
@@ -384,4 +389,5 @@ router.post('/:id/message', async (req, res) => {
 });
 
 module.exports = router;
+
 
