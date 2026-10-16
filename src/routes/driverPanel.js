@@ -29,12 +29,12 @@ router.get('/orders', requireAuth, requireRole('driver'), async (req, res) => {
        LEFT JOIN addresses a ON a.id = o.address_id
        WHERE (
            -- طلبات جاهزة بدون مندوب: تظهر للمندوب لو المتجر مش مربوط، أو هو واحد من المناديب المربوطين بيه
-           (o.status='ready' AND o.driver_id IS NULL AND (
+           (o.status='ready' AND o.driver_id IS NULL AND EXISTS (SELECT 1 FROM users d WHERE d.id=$1 AND d.is_online=true) AND (
              m.linked_driver_ids IS NULL OR m.linked_driver_ids = '[]'::jsonb
              OR m.linked_driver_ids @> to_jsonb($1::int)
              OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(m.linked_driver_ids,'[]'::jsonb)) t(d) WHERE t.d::int=$1)
            ))
-          OR (o.driver_id=$1 AND o.status IN ('ready','picked_up'))
+          OR (o.driver_id=$1 AND (o.status='picked_up' OR (o.status='ready' AND EXISTS (SELECT 1 FROM users d WHERE d.id=$1 AND d.is_online=true))))
        )
        ORDER BY o.created_at DESC`,
       [req.userId]
@@ -131,7 +131,7 @@ router.get('/rating', requireAuth, requireRole('driver'), async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT COALESCE(AVG(driver_rating), 0) AS avg_rating, COUNT(driver_rating) AS rating_count
-       FROM orders WHERE driver_id=$1 AND driver_rating IS NOT NULL`,
+       FROM driver_feedback WHERE driver_id=$1 AND driver_rating IS NOT NULL`,
       [req.userId]
     );
     res.json({
@@ -147,8 +147,8 @@ router.get('/rating', requireAuth, requireRole('driver'), async (req, res) => {
 router.get('/ratings', requireAuth, requireRole('driver'), async (req, res) => {
   try {
     const { rows } = await query(
-      `SELECT id, order_number, driver_rating, driver_rating_comment, delivered_at
-       FROM orders WHERE driver_id=$1 AND driver_rating IS NOT NULL
+      `SELECT id, service, order_number, driver_rating, driver_rating_comment, delivered_at
+       FROM driver_feedback WHERE driver_id=$1 AND driver_rating IS NOT NULL
        ORDER BY delivered_at DESC LIMIT 50`,
       [req.userId]
     );
@@ -207,6 +207,7 @@ router.get('/status', requireAuth, requireRole('driver'), async (req, res) => {
 router.put('/status', requireAuth, requireRole('driver'), async (req, res) => {
   try {
     const { is_online } = req.body || {};
+    if (typeof is_online !== 'boolean') return res.status(400).json({error:'حالة الاستقبال غير صحيحة'});
     await query('UPDATE users SET is_online=$1 WHERE id=$2', [!!is_online, req.userId]);
     res.json({ ok: true, is_online: !!is_online });
   } catch (err) {
@@ -258,6 +259,7 @@ router.put('/orders/:id/accept', requireAuth, requireRole('driver'), async (req,
       `UPDATE orders o SET status='picked_up', driver_id=$1, picked_up_at=now(), delivery_otp=$3
        FROM merchants m
        WHERE o.id=$2 AND o.status='ready'
+         AND EXISTS (SELECT 1 FROM users d WHERE d.id=$1 AND d.is_online=true AND d.driver_status='active')
          AND m.id = o.merchant_id
          AND (o.driver_id=$1 OR
               (o.driver_id IS NULL AND
@@ -348,4 +350,5 @@ router.post('/orders/:id/message', requireAuth, requireRole('driver'), async (re
 });
 
 module.exports = router;
+
 

@@ -23,17 +23,17 @@ try {
 }
 
 // ابعت Push لمجموعة توكنات — ويرجع التوكنات الميتة عشان ننضفها من قاعدة البيانات
-async function sendPushToTokens(tokens, { title, body, data }) {
+async function sendPushToTokens(tokens, { title, body, data, dataOnly = false }) {
   if (!messaging || !tokens || !tokens.length) return { removed: [] };
   const stringData = {};
   for (const [k, v] of Object.entries(data || {})) stringData[k] = String(v ?? '');
   const res = await messaging.sendEachForMulticast({
     tokens,
-    notification: { title, body },
-    data: stringData,
+    ...(dataOnly ? {} : {notification: { title, body }}),
+    data: {...stringData, title: String(title || ''), body: String(body || '')},
     android: {
       priority: 'high',
-      notification: { channelId: 'wasal_default', sound: 'default' },
+      ...(dataOnly ? {ttl: 60000} : {notification: { channelId: 'wasal_default', sound: 'default' }}),
     },
   });
   const removed = [];
@@ -54,3 +54,4 @@ async function sendPushToTokens(tokens, { title, body, data }) {
 }
 
 module.exports = { sendPushToTokens, pushEnabled: () => !!messaging };
+

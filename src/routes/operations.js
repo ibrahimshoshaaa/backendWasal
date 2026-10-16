@@ -59,8 +59,8 @@ router.put('/admin/jobs/:service/:id/driver',wrap(async(req,res)=>{
     if(!allowed.includes(job.status))fail(409,'إعادة الإسناد متاحة قبل الاستلام أو بدء الرحلة فقط');
     if(driver_id===job.driver_id)fail(400,'المندوب ده معيّن بالفعل');
     if(driver_id!==null) {
-      const {rows}=await client.query("SELECT id,gender FROM users WHERE id=$1 AND role='driver' AND driver_status='active' FOR SHARE",[driver_id]);
-      if(!rows.length)fail(400,'المندوب غير مفعل');
+      const {rows}=await client.query("SELECT id,gender FROM users WHERE id=$1 AND role='driver' AND driver_status='active' AND is_online=true FOR SHARE",[driver_id]);
+      if(!rows.length)fail(400,'المندوب غير متاح لاستقبال الطلبات');
       if(service==='trip'&&job.preferred_gender&&rows[0].gender!==job.preferred_gender)fail(400,'نوع المندوب لا يطابق اختيار العميل');
     }
     oldDriver=job.driver_id;
@@ -113,3 +113,4 @@ router.post('/admin/drivers/:id/settlements',wrap(async(req,res)=>{
   }catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}finally{client.release();}
 }));
 module.exports=router;
+

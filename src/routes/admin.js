@@ -155,7 +155,7 @@ router.get('/drivers', async (req, res) => {
      FROM users u
      LEFT JOIN (
        SELECT driver_id, AVG(driver_rating) AS avg_rating, COUNT(driver_rating) AS rating_count
-       FROM orders WHERE driver_rating IS NOT NULL GROUP BY driver_id
+       FROM driver_feedback WHERE driver_rating IS NOT NULL GROUP BY driver_id
      ) r ON r.driver_id = u.id
      WHERE u.role='driver' ORDER BY u.id DESC`
   );
@@ -699,13 +699,14 @@ router.put('/orders/:id/driver', async (req, res) => {
     if (!driver_id) return res.status(400).json({ error: 'driver_id مطلوب' });
 
     const { rows: drivers } = await query(
-      "SELECT id FROM users WHERE id=$1 AND role='driver' AND driver_status='active'",
+      "SELECT id FROM users WHERE id=$1 AND role='driver' AND driver_status='active' AND is_online=true",
       [driver_id]
     );
     if (!drivers.length) return res.status(400).json({ error: 'المندوب غير موجود أو غير مفعل' });
 
     const { rows } = await query(
       `UPDATE orders SET driver_id=$1 WHERE id=$2 AND status='ready' AND driver_id IS NULL
+         AND EXISTS (SELECT 1 FROM users d WHERE d.id=$1 AND d.is_online=true AND d.driver_status='active')
        RETURNING id, order_number, status, customer_id, merchant_id`,
       [driver_id, req.params.id]
     );

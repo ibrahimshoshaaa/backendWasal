@@ -444,6 +444,20 @@ async function seed() {
     );
   }
 
+
+  for (const table of ['trips','hataali_orders']) {
+    await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS driver_rating INT CHECK (driver_rating BETWEEN 1 AND 5)`);
+    await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS driver_rating_comment TEXT`);
+  }
+  await query(`CREATE OR REPLACE VIEW driver_feedback AS
+    SELECT id, 'store'::text AS service, order_number, driver_id, driver_rating, driver_rating_comment, delivered_at
+      FROM orders WHERE driver_rating IS NOT NULL
+    UNION ALL SELECT id, 'trip', 'TR-' || id::text, driver_id, driver_rating, driver_rating_comment, updated_at
+      FROM trips WHERE driver_rating IS NOT NULL
+    UNION ALL SELECT id, 'hataali', 'HT-' || id::text, driver_id, driver_rating, driver_rating_comment, updated_at
+      FROM hataali_orders WHERE driver_rating IS NOT NULL`);
+  await query(`ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS session_filtered BOOLEAN NOT NULL DEFAULT false`);
+
   const { rows: adminCount } = await query("SELECT COUNT(*)::int AS n FROM users WHERE role='admin'");
   if (adminCount[0].n === 0) {
     const hash = await bcrypt.hash('admin123', 10);
@@ -458,6 +472,10 @@ async function seed() {
 
 // Helper: create notification for a user (DB + FCM push لكل أجهزته)
 async function createNotification(userId, { title, body, type, orderId, resourceId, service }) {
+  if (['new_available_order','new_hataali_order','new_trip'].includes(type)) {
+    const {rows} = await query("SELECT 1 FROM users WHERE id=$1 AND role='driver' AND driver_status='active' AND is_online=true",[userId]);
+    if (!rows.length) return;
+  }
   await query(
     `INSERT INTO notifications (user_id, title, body, type, order_id)
      VALUES ($1, $2, $3, $4, $5)`,
@@ -468,19 +486,16 @@ async function createNotification(userId, { title, body, type, orderId, resource
   try {
     const { sendPushToTokens } = require('./config/firebase');
     const { rows } = await query(
-      'SELECT token FROM device_tokens WHERE user_id=$1', [userId]
+      'SELECT token, session_filtered FROM device_tokens WHERE user_id=$1', [userId]
     );
-    const tokens = rows.map((r) => r.token);
-    if (tokens.length) {
+    for (const dataOnly of [false,true]) {
+      const tokens = rows.filter(r => r.session_filtered === dataOnly).map(r => r.token);
+      if (!tokens.length) continue;
       const r = await sendPushToTokens(tokens, {
-        title,
-        body,
-        data: { type: type || '', orderId: resourceId || orderId || '', resourceId: resourceId || orderId || '', service: service || (type?.includes('hataali') ? 'hataali' : type?.includes('trip') ? 'trip' : 'store') },
+        title, body, dataOnly,
+        data: { recipient_id: userId, type: type || '', orderId: resourceId || orderId || '', resourceId: resourceId || orderId || '', service: service || (type?.includes('hataali') ? 'hataali' : type?.includes('trip') ? 'trip' : 'store') },
       });
-      // نظّف التوكنات الميتة (المستخدم مسح التطبيق مثلاً)
-      if (r.removed && r.removed.length) {
-        await query('DELETE FROM device_tokens WHERE token = ANY($1)', [r.removed]);
-      }
+      if (r.removed?.length) await query('DELETE FROM device_tokens WHERE token = ANY($1)', [r.removed]);
     }
   } catch (e) {
     console.error('[fcm] push failed:', e.message);

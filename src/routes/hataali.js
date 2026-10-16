@@ -1,8 +1,11 @@
+const { rateDriver } = require('../services/driverFeedback');
 const express = require('express');
 const { collection } = require('../services/finance');
 const { pool, query, notifyOnlineDrivers, createNotification } = require('../db');
 const { prepareSubmission, commitSubmission, respondSubmissionError } = require('../services/submissions');
 const router = express.Router();
+
+router.post('/:id/driver-rating', rateDriver('hataali_orders'));
 
 // ─── Customer ─────────────────────────────────────────────────────────────────
 
@@ -103,6 +106,7 @@ router.get('/available', async (req, res) => {
        FROM hataali_orders h
        JOIN users u ON u.id = h.customer_id
        WHERE h.status = 'approved' AND (h.driver_id IS NULL OR h.driver_id=$1)
+         AND EXISTS (SELECT 1 FROM users d WHERE d.id=$1 AND d.is_online=true)
        ORDER BY h.created_at ASC`, [req.userId]
     );
     res.json(rows);
@@ -123,6 +127,7 @@ router.post('/:id/accept', async (req, res) => {
       `UPDATE hataali_orders
        SET driver_id=$1, status='picked_up', updated_at=now(), delivery_otp=$3
        WHERE id=$2 AND status='approved' AND (driver_id IS NULL OR driver_id=$1)
+         AND EXISTS (SELECT 1 FROM users d WHERE d.id=$1 AND d.is_online=true AND d.driver_status='active')
        RETURNING *`,
       [req.userId, req.params.id, otp]
     );
@@ -350,4 +355,5 @@ router.post('/:id/message', async (req, res) => {
 });
 
 module.exports = router;
+
 
